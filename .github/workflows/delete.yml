@@ -1,19 +1,14 @@
-name: Delete from Cloudflare Workers
+name: Uninstall from Cloudflare Workers
 
-# 只支持手动触发：删除本仓库部署的 Worker，以及（可选）它的 STATE KV。
-# 危险操作，需要输入与 Worker 名称完全一致的确认字符串才会执行。
+# 只支持手动触发：删除本仓库部署的 Worker 与它的 KV（整服务一起删）。
+# 需要输入固定确认串，防止误触发。
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: '输入 Worker 名称以确认删除（见 wrangler.jsonc 的 name）'
+        description: '输入确认串 delete-let-monitor 以执行删除'
         required: true
         type: string
-      delete_kv:
-        description: '同时删除 STATE KV namespace（会丢失去重状态）'
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -29,6 +24,7 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CONFIRM: ${{ inputs.confirm }}
     steps:
       - uses: actions/checkout@v7
 
@@ -46,28 +42,20 @@ jobs:
           [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
           [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
           if [ -n "$missing" ]; then
-            echo "::error::缺少必填 Secrets:$missing（见 README 删除步骤）"
+            echo "::error::缺少必填 Secrets:$missing（见 README 卸载一节）"
             exit 1
           fi
 
       - name: 确认目标账号
         run: npx wrangler whoami
 
-      - name: 删除 Worker 与资源
-        env:
-          CONFIRM: ${{ inputs.confirm }}
-        run: |
-          if [ "${{ inputs.delete_kv }}" = "true" ]; then
-            node scripts/teardown.mjs --confirm="$CONFIRM"
-          else
-            node scripts/teardown.mjs --confirm="$CONFIRM" --keep-kv
-          fi
+      - name: 删除 Worker 与 KV
+        run: node scripts/teardown.mjs --confirm="$CONFIRM"
 
       - name: 删除结果
         run: |
-          echo "### 删除完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 卸载完成" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- 确认字符串: ${{ inputs.confirm }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- 是否删除 KV: ${{ inputs.delete_kv }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 已删除 Worker 与它的 KV namespace" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "需要重新部署时，回到 Deploy workflow 手动运行即可。" >> "$GITHUB_STEP_SUMMARY"

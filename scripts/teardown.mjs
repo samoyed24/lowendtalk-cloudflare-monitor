@@ -1,19 +1,21 @@
-// 删除部署：Worker + 它真正绑定的 KV namespace。
+// 卸载：删除 Worker 与它绑定的 KV namespace（整服务一起删，不保留半个）。
 //
 // 用法（在仓库根目录执行）：
 //   CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=yyy \
-//     node scripts/teardown.mjs --confirm=<Worker 名称> [--keep-kv]
+//     node scripts/teardown.mjs --confirm=delete-let-monitor [--config=wrangler.jsonc]
 //
-// 安全设计（重要）：
+// 安全设计：
+//   · --confirm 必须是固定确认串 CONFIRM_PHRASE，防止误触发。
 //   · 只删「该 Worker 的绑定里真实引用」的 KV，绝不按名字猜。
 //   · 删除前检查该 KV 是否还被别的 Worker 引用；被引用则跳过（避免误删共用资源）。
-//   · --confirm 必须与配置里的 Worker 名称完全一致。
-//   · Worker 已不存在时不删通用命名的 KV，只清理明确属于它的 <worker>-state。
+//   · Worker 已不存在时只清理它名下的 <worker>-state。
 
 import { readFileSync } from "node:fs";
 
+/** 固定确认串：必须原样传入才会执行删除。 */
+export const CONFIRM_PHRASE = "delete-let-monitor";
+
 const args = process.argv.slice(2);
-const keepKv = args.includes("--keep-kv");
 const confirm = args.find((a) => a.startsWith("--confirm="))?.slice("--confirm=".length) ?? "";
 const configPath = args.find((a) => a.startsWith("--config="))?.slice("--config=".length) ?? "wrangler.jsonc";
 
@@ -28,6 +30,11 @@ if (!token) {
 	process.exit(1);
 }
 
+if (confirm !== CONFIRM_PHRASE) {
+	console.error(`::error::确认串不匹配。要执行删除，请传入 --confirm=${CONFIRM_PHRASE}`);
+	process.exit(1);
+}
+
 const workerName = (() => {
 	const text = readFileSync(configPath, "utf8");
 	const m = text.match(/"name"\s*:\s*"([^"]+)"/);
@@ -38,11 +45,7 @@ const workerName = (() => {
 	return m[1];
 })();
 
-console.log(`配置中的 Worker 名称：${workerName}`);
-if (confirm !== workerName) {
-	console.error(`::error::确认字符串不匹配。要删除请传入 --confirm=${workerName}`);
-	process.exit(1);
-}
+console.log(`确认串正确，目标 Worker：${workerName}`);
 
 const api = async (path, method = "GET") => {
 	const r = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
@@ -59,13 +62,13 @@ const api = async (path, method = "GET") => {
 	return body.result;
 };
 
-/** 取某个 Worker 脚本的 KV 绑定：[{ name, namespace_id }]。 */
+/** 取某个 Worker 脚本的 KV 绑定：[{ name, namespace_id }]；脚本不存在返回 null。 */
 const kvBindings = async (script) => {
 	try {
 		const settings = await api(`/accounts/${accountId}/workers/scripts/${script}/settings`);
 		return (settings.bindings ?? []).filter((b) => b.type === "kv_namespace");
 	} catch (exc) {
-		if (exc.status === 404) return null; // 脚本不存在
+		if (exc.status === 404) return null;
 		throw exc;
 	}
 };
@@ -80,12 +83,12 @@ if (bindings === null) {
 	for (const b of bindings) console.log(`  binding=${b.name} namespace=${b.namespace_id}`);
 }
 
-// 找出这些 namespace 是否还被其它 Worker 引用。
 const namespaces = await api(`/accounts/${accountId}/storage/kv/namespaces`);
 const titleOf = new Map(namespaces.map((n) => [n.id, n.title]));
 const candidateIds = new Set((bindings ?? []).map((b) => b.namespace_id));
 
-const referencedByOthers = new Map(); // namespace_id -> [worker names]
+// 这些 namespace 是否还被其它 Worker 引用。
+const referencedByOthers = new Map();
 if (candidateIds.size > 0) {
 	const scripts = await api(`/accounts/${accountId}/workers/scripts`);
 	for (const s of scripts) {
@@ -108,19 +111,13 @@ if (bindings === null) {
 	console.log(`已删除 Worker：${workerName}`);
 }
 
-if (keepKv) {
-	console.log("已保留 KV namespace（--keep-kv）。");
-	process.exit(0);
-}
-
-console.log("--- 处理 KV namespace ---");
+console.log("--- 删除 KV namespace ---");
 const toDelete = [];
 if (bindings === null) {
-	// Worker 已不存在：只清理由它的名字派生的 KV，避免误删共用资源。
-	const derived = `${workerName}-state`;
-	const hit = namespaces.find((n) => n.title === derived);
-	if (hit) toDelete.push(hit);
-	else console.log(`未找到 ${derived}，跳过。`);
+	// Worker 已不存在：只清理由它名字派生的 KV，避免误删共用资源。
+	const derived = namespaces.find((n) => n.title === `${workerName}-state`);
+	if (derived) toDelete.push(derived);
+	else console.log(`未找到 ${workerName}-state，跳过。`);
 } else {
 	for (const b of bindings) {
 		const others = referencedByOthers.get(b.namespace_id);
@@ -142,4 +139,4 @@ for (const ns of toDelete) {
 	await api(`/accounts/${accountId}/storage/kv/namespaces/${ns.id}`, "DELETE");
 }
 
-console.log("完成。");
+console.log("完成：Worker 与相关 KV 均已删除。");

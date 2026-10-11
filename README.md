@@ -9,21 +9,20 @@
 ## 目录
 
 - [一、一键部署（GitHub Actions）](#一一键部署github-actions)
-- [二、为什么推荐用 AgentNotify，而不是自建 SMTP](#二为什么推荐用-agentnotify而不是自建-smtp)
-- [三、部署后调整参数](#三部署后调整参数)
-- [四、配置项](#四配置项)
-- [五、推送间隔](#五推送间隔)
-- [六、工作方式](#六工作方式)
-- [七、删除部署](#七删除部署)
-- [八、本地开发与部署](#八本地开发与部署)
-- [九、常见问题](#九常见问题)
-- [十、已知限制](#十已知限制)
+- [二、部署后调整参数](#二部署后调整参数)
+- [三、配置项](#三配置项)
+- [四、推送间隔](#四推送间隔)
+- [五、工作方式](#五工作方式)
+- [六、卸载](#六卸载)
+- [七、本地开发与部署](#七本地开发与部署)
+- [八、常见问题](#八常见问题)
+- [九、已知限制](#九已知限制)
 
 ---
 
 ## 一、一键部署（GitHub Actions）
 
-不用装 Node、不用配 wrangler，全程在 GitHub 网页上完成。**只需填入部署必需参数，其余用仓库默认值**（见[第三节](#三部署后调整参数)）。
+不用装 Node、不用配 wrangler，全程在 GitHub 网页上完成。**只需填入部署必需参数，其余用仓库默认值**（见[第二节](#二部署后调整参数)）。
 
 ### 1. Fork 本仓库
 
@@ -48,17 +47,16 @@
 
 ![创建 Token](docs/cloudflare-token-4.png)
 
-**Token 只显示一次，务必当场复制**。
+创建成功后，页面上会**同时给出 Account ID 和 API Token**，一并复制即可，不用再去别处找：
 
-![复制 Token（只显示一次）](docs/cloudflare-token-5.png)
+![创建成功后复制 Account ID 与 Your API Token](docs/cloudflare-token-5.png)
+
+- **Your API Token**：只显示这一次，务必当场复制，关掉后无法再查看。
+- **Account ID**：就在同一页上方，直接复制。
 
 > 同一页面下方的 `Access Key ID` / `Secret Access Key` 是 R2 的 S3 凭证，**本项目用不到**，不要填进 GitHub Secrets。
 
-### 3. 找到 Account ID
-
-在 [Cloudflare Dashboard](https://dash.cloudflare.com) 打开 **Workers & Pages**，右侧 **Account ID** 即为所需值；也可在账号首页 URL 里找到。
-
-### 4. 在 fork 的仓库里填 Secrets
+### 3. 在 fork 的仓库里填 Secrets
 
 **Settings → Secrets and variables → Actions → New repository secret**。
 
@@ -68,10 +66,10 @@
 
 | 名称 | 说明 |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | 上一步创建的 API Token |
-| `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID |
+| `CLOUDFLARE_API_TOKEN` | 上一步复制的 API Token |
+| `CLOUDFLARE_ACCOUNT_ID` | 上一步复制的 Account ID |
 
-推送通道（**至少配一个**，推荐通道 1，理由见[第二节](#二为什么推荐用-agentnotify而不是自建-smtp)）：
+推送通道（**至少配一个**，推荐通道 1）：
 
 | 名称 | 必填 | 说明 |
 |---|---|---|
@@ -81,7 +79,10 @@
 | `SMTP_PASS` | 通道 2 | 邮箱授权码（不是登录密码） |
 | `MAIL_TO` | 通道 2 | 收件邮箱 |
 
-### 5. 运行 workflow
+> **通道 1（AgentNotify，推荐）**：给本项目仓库点个 Star，再到 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录，添加并验证接收邮箱，然后申请一个 API Key 就能用（明文只展示一次）。不点 Star 调用会返回 `403 STAR_REQUIRED`。
+> **通道 2（自建 SMTP）**：要自己准备邮箱、授权码、端口和 TLS 模式，配起来更麻烦，除非你已经有稳定的发信服务，否则优先用通道 1。
+
+### 4. 运行 workflow
 
 **Actions → Deploy to Cloudflare Workers → Run workflow**（分支选 `main`）→ 绿色 **Run workflow**。
 
@@ -102,7 +103,7 @@ workflow 会自动：
 
 ![运行成功与 deploy summary](docs/github-action-2.png)
 
-### 6. 确认结果
+### 5. 确认结果
 
 - Actions 运行成功，摘要里能看到 Worker 地址（形如 `https://let-lowprice-monitor.<你的子域>.workers.dev`）。
 - 浏览器打开该地址的 `/healthz`，返回 `{"ok":true}`。
@@ -114,28 +115,7 @@ workflow 会自动：
 
 ---
 
-## 二、为什么推荐用 AgentNotify，而不是自建 SMTP
-
-**结论：优先用 `NOTIFY_KEY` + `NOTIFY_TO`（AgentNotify），别一上来就自己配 SMTP。**
-
-| 对比项 | AgentNotify（推荐） | 自建 SMTP |
-|---|---|---|
-| 配置成本 | 填 2 个 Secret，登录控制台点几下 | 需要邮箱、授权码、端口、TLS 模式四项 |
-| 发件通道 | 服务方托管，不用管发信域名 | 依赖你自己的邮箱服务商 |
-| 端口限制 | 不受影响 | 25 端口被 Cloudflare 禁止出站，只能 465 / 587 |
-| 协议实现 | 标准 HTTPS API | 本项目手写 `EHLO → AUTH LOGIN → DATA`，出问题排查面更大 |
-| 换收件人 | 改 1 个 Secret | 改 Secret，且可能要重新授权 |
-| 失败可见性 | 返回 `log_id`，可查投递结果 | 只能看 SMTP 应答码 |
-
-关键差异在于：**SMTP 是这套流程里最容易出问题的一环**。它要自己处理 TLS 升级、认证、编码和应答码解析，任一环节不对就静默失败；而 AgentNotify 只是两个 HTTPS 请求。
-
-只有这些情况才值得自建 SMTP：已经有一套稳定的发信服务、需要特定发件域名、或不想依赖第三方。
-
-> AgentNotify 使用前需先给其 GitHub 仓库点一个 Star，否则调用返回 `403 STAR_REQUIRED`。在 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录控制台，在**接收邮箱**里添加并验证地址，再在 **API Key** 里创建 Key（明文只展示一次）。
-
----
-
-## 三、部署后调整参数
+## 二、部署后调整参数
 
 **一键部署只填必需参数**：Cloudflare 凭据 + 一个推送通道。下面这些都用仓库默认值，**部署成功后按需再改**：
 
@@ -146,7 +126,7 @@ workflow 会自动：
 | `LOOKBACK_DAYS` / `MAX_POSTS` | `7` / `60` | 同上 |
 | `CLASSIFY_BATCH_SIZE` | `1` | 同上 |
 | `REQUIRE_SERVER_TAG` | `true` | 同上 |
-| `INTERVAL_MINUTES` | `60` | 同上，且要同步改 cron（见[第五节](#五推送间隔)） |
+| `INTERVAL_MINUTES` | `60` | 同上，且要同步改 cron（见[第四节](#四推送间隔)） |
 | `SMTP_HOST` / `SMTP_PORT` | `smtp.qq.com` / `465` | 同上 |
 | `NOTIFY_URL` / `NOTIFY_TIMEOUT` | 见下表 | 同上 |
 
@@ -157,7 +137,7 @@ workflow 会自动：
 
 ---
 
-## 四、配置项
+## 三、配置项
 
 ### Secrets（GitHub Secrets → workflow 写入 Worker）
 
@@ -199,7 +179,7 @@ workflow 会自动：
 
 ---
 
-## 五、推送间隔
+## 四、推送间隔
 
 间隔由两处共同决定，改动时**同步改两处**：
 
@@ -222,7 +202,7 @@ workflow 会自动：
 
 ---
 
-## 六、工作方式
+## 五、工作方式
 
 ```
 唤醒（Worker Cron，默认 0 * * * * UTC）
@@ -256,31 +236,44 @@ workflow 会自动：
 
 ---
 
-## 七、删除部署
+## 六、卸载
 
-要彻底清理（删除 Worker、Cron 触发器，以及它绑定的 KV），用 **Actions → Delete from Cloudflare Workers → Run workflow**。
+卸载会把**整个服务删干净**：Worker、Cron 触发器，以及它绑定的 KV。没有「删一半」的选项。
 
-需要填两个输入：
+用 **Actions → Uninstall from Cloudflare Workers → Run workflow**，输入确认串：
 
 | 输入 | 说明 |
 |---|---|
-| `confirm` | **必须**与 `wrangler.jsonc` 里的 Worker 名称完全一致（默认 `let-lowprice-monitor`），否则拒绝执行 |
-| `delete_kv` | 是否连同 KV 一起删。`true` 会**永久丢失**去重状态，下次部署会把窗口内的帖子重推一次 |
+| `confirm` | **必须**原样输入 `delete-let-monitor`，否则拒绝执行 |
 
-需要同一个 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`（与部署共用）。
+用的是同一套 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`（与部署共用）。
+
+workflow 会：
+
+1. 校验 Secrets 与确认串；
+2. 打印当前账号（`wrangler whoami`），避免删错账号；
+3. 删除 Worker（含 Cron 触发器）；
+4. 删除该 Worker 绑定的 KV namespace。
 
 **安全设计**（`scripts/teardown.mjs`）：
 
 - 只删除**该 Worker 的绑定里真实引用**的 KV，**绝不按名字猜**。
-- 删除前检查该 KV 是否仍被**其它 Worker** 引用；被引用则跳过并告警——所以多个部署共用同一个 KV 时，删掉其中一个不会影响其它。
-- 删 Worker 是幂等的：已经不存在时继续清理它名下的 `<worker>-state`，不会中途报错。
-- 想保留数据、只停服务：`delete_kv` 选 `false`（等于 `--keep-kv`）。
+- 删除前检查该 KV 是否仍被**其它 Worker** 引用；被引用则跳过并告警——多个部署共用同一个 KV 时，删掉其中一个不会影响其它。
+- 删 Worker 是幂等的：已经不存在时继续清理它名下的 `<worker>-state`。
 
-> 只是想**暂停**而不是删除？去 dashboard 的 Workers → Settings → Triggers 关掉 Cron 触发器即可，KV 与 Worker 都留着。
+> **注意**：删掉 KV 会永久丢失去重状态。之后重新部署，首次运行会把窗口内（默认 7 天）的帖子当新帖重推一次。
+> 只是想**暂停**而不是卸载？去 dashboard 的 Workers → Settings → Triggers 关掉 Cron 触发器即可，Worker 与 KV 都留着。
+
+本地也可以直接跑（不经过 GitHub Actions）：
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=<Account ID> CLOUDFLARE_API_TOKEN=<Token> \
+  node scripts/teardown.mjs --confirm=delete-let-monitor
+```
 
 ---
 
-## 八、本地开发与部署
+## 七、本地开发与部署
 
 前置：`node >= 18`、已登录的 wrangler（`npx wrangler login`）。
 
@@ -321,7 +314,7 @@ npx wrangler tail  # 看线上日志
 
 ---
 
-## 九、常见问题
+## 八、常见问题
 
 **Q：跑完了但没收到邮件？**
 
@@ -357,7 +350,7 @@ dashboard → Workers → 你的 Worker → Settings → Triggers，把 Cron Tri
 
 ---
 
-## 十、已知限制
+## 九、已知限制
 
 - **抓取走 Worker 直连 RSS**：不再依赖第三方转换服务。LowEndTalk 前面有 Cloudflare，**本机直连会被挑战页拦掉（403）**，但 Worker 出口可以正常读取；因此抓取失败时请用 `wrangler tail` 看线上日志，而不是本地 `curl`。若以后 LET 对 Worker 出口也收紧，抓取会失败并发告警邮件。
 - **标签与价格由 AI 判定**：均可能出错，尤其是价格仅出现在图片中、或只写「联系报价」的帖子。
