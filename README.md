@@ -14,9 +14,10 @@
 - [四、配置项](#四配置项)
 - [五、推送间隔](#五推送间隔)
 - [六、工作方式](#六工作方式)
-- [七、本地开发与部署](#七本地开发与部署)
-- [八、常见问题](#八常见问题)
-- [九、已知限制](#九已知限制)
+- [七、删除部署](#七删除部署)
+- [八、本地开发与部署](#八本地开发与部署)
+- [九、常见问题](#九常见问题)
+- [十、已知限制](#十已知限制)
 
 ---
 
@@ -255,7 +256,31 @@ workflow 会自动：
 
 ---
 
-## 七、本地开发与部署
+## 七、删除部署
+
+要彻底清理（删除 Worker、Cron 触发器，以及它绑定的 KV），用 **Actions → Delete from Cloudflare Workers → Run workflow**。
+
+需要填两个输入：
+
+| 输入 | 说明 |
+|---|---|
+| `confirm` | **必须**与 `wrangler.jsonc` 里的 Worker 名称完全一致（默认 `let-lowprice-monitor`），否则拒绝执行 |
+| `delete_kv` | 是否连同 KV 一起删。`true` 会**永久丢失**去重状态，下次部署会把窗口内的帖子重推一次 |
+
+需要同一个 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`（与部署共用）。
+
+**安全设计**（`scripts/teardown.mjs`）：
+
+- 只删除**该 Worker 的绑定里真实引用**的 KV，**绝不按名字猜**。
+- 删除前检查该 KV 是否仍被**其它 Worker** 引用；被引用则跳过并告警——所以多个部署共用同一个 KV 时，删掉其中一个不会影响其它。
+- 删 Worker 是幂等的：已经不存在时继续清理它名下的 `<worker>-state`，不会中途报错。
+- 想保留数据、只停服务：`delete_kv` 选 `false`（等于 `--keep-kv`）。
+
+> 只是想**暂停**而不是删除？去 dashboard 的 Workers → Settings → Triggers 关掉 Cron 触发器即可，KV 与 Worker 都留着。
+
+---
+
+## 八、本地开发与部署
 
 前置：`node >= 18`、已登录的 wrangler（`npx wrangler login`）。
 
@@ -296,7 +321,7 @@ npx wrangler tail  # 看线上日志
 
 ---
 
-## 八、常见问题
+## 九、常见问题
 
 **Q：跑完了但没收到邮件？**
 
@@ -332,7 +357,7 @@ dashboard → Workers → 你的 Worker → Settings → Triggers，把 Cron Tri
 
 ---
 
-## 九、已知限制
+## 十、已知限制
 
 - **抓取走 Worker 直连 RSS**：不再依赖第三方转换服务。LowEndTalk 前面有 Cloudflare，**本机直连会被挑战页拦掉（403）**，但 Worker 出口可以正常读取；因此抓取失败时请用 `wrangler tail` 看线上日志，而不是本地 `curl`。若以后 LET 对 Worker 出口也收紧，抓取会失败并发告警邮件。
 - **标签与价格由 AI 判定**：均可能出错，尤其是价格仅出现在图片中、或只写「联系报价」的帖子。

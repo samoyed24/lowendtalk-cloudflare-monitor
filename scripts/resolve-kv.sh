@@ -26,7 +26,7 @@ if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
 fi
 
 if [[ ! -f "$CONFIG" ]]; then
-	echo "错误：找不到配置文件 $CONFIG（请在仓库根目录执行）。" >&2
+	echo "错误：找不到配置文件 ${CONFIG}（请在仓库根目录执行）。" >&2
 	exit 1
 fi
 
