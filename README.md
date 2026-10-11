@@ -15,8 +15,6 @@
 - [五、工作方式](#五工作方式)
 - [六、卸载](#六卸载)
 - [七、本地开发与部署](#七本地开发与部署)
-- [八、常见问题](#八常见问题)
-- [九、已知限制](#九已知限制)
 
 ---
 
@@ -238,7 +236,7 @@ workflow 会自动：
 
 ## 六、卸载
 
-卸载会把**整个服务删干净**：Worker、Cron 触发器，以及它绑定的 KV。没有「删一半」的选项。
+卸载会把**整个服务删干净**：Worker、Cron 触发器，以及它绑定的 KV。
 
 用 **Actions → Uninstall from Cloudflare Workers → Run workflow**，输入确认串：
 
@@ -311,48 +309,3 @@ npx wrangler tail  # 看线上日志
 ```
 
 > Workers AI 在本地开发时也是远端调用，会产生用量费用。
-
----
-
-## 八、常见问题
-
-**Q：跑完了但没收到邮件？**
-
-有新增才会发信。若本次没有新帖，会静默退出（日志里是「0 条是新增」）。先看 `wrangler tail` 或 dashboard 日志确认。
-
-**Q：Actions 里报缺少 Secrets？**
-
-必填 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`，且至少配一个推送通道（`NOTIFY_KEY` + `NOTIFY_TO` 或 SMTP 三件套）。workflow 会在「校验必填参数」步骤直接失败并提示缺哪个。
-
-**Q：API Token 权限不够？**
-
-用官方 **Edit Cloudflare Workers** 模板，或自定义勾选 `Workers Scripts: Edit` 与 `Workers KV Storage: Edit`。缺 KV 权限会在「解析 STATE KV namespace」步骤失败。
-
-**Q：想临时停掉？**
-
-dashboard → Workers → 你的 Worker → Settings → Triggers，把 Cron Trigger 暂停即可；或直接部署一个去掉 `triggers.crons` 的配置。
-
-**Q：邮件里出现了 SSL 证书、控制面板这类内容？**
-
-这些是 Offers 板块里混着的非服务器帖子。默认已过滤（`REQUIRE_SERVER_TAG=true`），置为 `false` 可一并推送。
-
-**Q：从旧的 GitHub Actions 版迁移过来，状态怎么办？**
-
-状态存的地方变了（Actions cache → KV），旧状态带不过来。首次运行会把窗口内（默认 7 天）的帖子全当新增推一次，之后恢复正常。觉得太多可以先把 `LOOKBACK_DAYS` 调小跑一次，再调回来。若想沿用某个已存在的 KV，把它的 id 设为 repository variable `LET_STATE_KV_ID`。
-
-**Q：AI 模型想换一个？**
-
-改 `AI_MODEL` 为 Workers AI 目录里的文本生成模型即可，提交后重跑 workflow。部分模型需要 Workers Paid 计划或 AI Gateway 额度。
-
-默认 Qwen3 30B A3B 的单位 token 消耗比原来的 Llama 3.3 70B 更低，并使用 Qwen 的 [`/no_think` 软开关](https://qwenlm.github.io/blog/qwen3/) 请求非思考模式。更换模型不会重置免费额度：[每天 10,000 Neurons，UTC 零点重置](https://developers.cloudflare.com/workers-ai/platform/pricing/)。本地测试也会消耗远端额度；仅新增帖子进入 AI，但清空状态或发信失败后重跑可能重复分析。
-
-默认 Qwen 调用使用 JSON Schema 请求完整的 `i/tags/prices/zh` 数组，并兼容接口返回的文本或已解析数组。格式约束不保证价格、配置等事实正确；若返回仍不完整或无法解析，运行会失败且不保存状态，不会截掉错误条目后记为已推送。
-
----
-
-## 九、已知限制
-
-- **抓取走 Worker 直连 RSS**：不再依赖第三方转换服务。LowEndTalk 前面有 Cloudflare，**本机直连会被挑战页拦掉（403）**，但 Worker 出口可以正常读取；因此抓取失败时请用 `wrangler tail` 看线上日志，而不是本地 `curl`。若以后 LET 对 Worker 出口也收紧，抓取会失败并发告警邮件。
-- **标签与价格由 AI 判定**：均可能出错，尤其是价格仅出现在图片中、或只写「联系报价」的帖子。
-- **Cron 不保证精确准时**：高峰期可能延迟数分钟。
-- **自定义 SMTP 走 TCP sockets**：25 端口被 Cloudflare 禁止出站，只能用 465（隐式 TLS）或 587（STARTTLS）；协议是手写的 `EHLO → AUTH LOGIN → DATA`，QQ 邮箱请用授权码。
