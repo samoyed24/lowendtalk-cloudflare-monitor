@@ -305,8 +305,16 @@ npx wrangler tail  # 看线上日志
 
 1. 在部署 Worker 的账号启用 [Zero Trust](https://developers.cloudflare.com/cloudflare-one/setup/)。
 2. 打开 **Workers & Pages → 你的 Worker → Access → Protect this Worker behind Access**。
+
+   ![Worker 的 Access 页面：启用访问保护](docs/zero-trust-access-1.png)
+
 3. 保护范围选择 **All traffic**，认证策略选择 **Cloudflare account**，点击 **Apply Access**。
+
+   ![选择 All traffic 与 Cloudflare account 并应用 Access](docs/zero-trust-access-2.png)
+
 4. 访问 Worker 根地址，用该 Cloudflare 账号的成员身份登录。
+
+   ![通过 Cloudflare account members 登录管理端](docs/zero-trust-access-3.png)
 
 完整设置见 [Cloudflare Access for Workers](https://developers.cloudflare.com/workers/configuration/cloudflare-access/)。Access 保护 Worker 的生产域名与预览地址；管理页面及 API 还会检查平台提供的认证身份，未认证请求返回 `403`。Cron 定时任务不需要网页登录。
 
