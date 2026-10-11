@@ -45,7 +45,7 @@
 
 ![创建 Token](docs/cloudflare-token-4.png)
 
-创建成功后，页面上会**同时给出 Account ID 和 API Token**，一并复制即可，不用再去别处找：
+创建成功后，页面上会**同时给出 Account ID 和 API Token**：
 
 ![创建成功后复制 Account ID 与 Your API Token](docs/cloudflare-token-5.png)
 
