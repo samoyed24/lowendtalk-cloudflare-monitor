@@ -52,6 +52,9 @@ jobs:
           fi
           echo "参数校验通过"
 
+      - name: 检查类型
+        run: npm run typecheck
+
       - name: 运行测试
         run: npm test
 
@@ -83,7 +86,14 @@ jobs:
             exit "$code"
           fi
           if [ -n "$url" ]; then
-            curl -fsS --max-time 30 "$url/healthz" || echo "::warning::健康检查未通过（新子域证书可能仍在签发），可稍后访问 $url/healthz"
+            status="$(curl -sS --max-time 30 -o /tmp/health.json -w '%{http_code}' "$url/healthz" || true)"
+            if [ "$status" = "200" ] && node -e 'try { process.exit(JSON.parse(require("node:fs").readFileSync("/tmp/health.json", "utf8")).ok === true ? 0 : 1); } catch { process.exit(1); }'; then
+              echo "健康检查通过"
+            elif [ "$status" = "302" ] || [ "$status" = "303" ] || [ "$status" = "401" ] || [ "$status" = "403" ]; then
+              echo "::notice::健康检查需要 Cloudflare Access 登录，请在浏览器中验证"
+            else
+              echo "::warning::健康检查未通过（HTTP $status），请稍后访问 $url/healthz"
+            fi
           fi
 
       - name: 写入 Worker secrets
@@ -113,7 +123,8 @@ jobs:
           echo "- Worker: lowendtalk-cloudflare-monitor" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$DEPLOY_URL" ]; then
             echo "- 地址: $DEPLOY_URL" >> "$GITHUB_STEP_SUMMARY"
-            echo "- 健康检查: 浏览器打开 $DEPLOY_URL/healthz 应返回 ok true" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 网页管理端: $DEPLOY_URL/（先在 Worker 的 Access 中选择 All traffic + Cloudflare account）" >> "$GITHUB_STEP_SUMMARY"
+            echo "- 健康检查: 登录后打开 $DEPLOY_URL/healthz，应返回 ok true" >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "- 定时: 每小时整点（UTC），首次创建触发器最多需 15 分钟传播" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"

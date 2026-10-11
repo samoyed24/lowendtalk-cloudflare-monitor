@@ -15,6 +15,7 @@
 - [五、工作方式](#五工作方式)
 - [六、卸载](#六卸载)
 - [七、本地开发与部署](#七本地开发与部署)
+- [八、网页管理端](#八网页管理端)
 
 ---
 
@@ -103,7 +104,7 @@ workflow 会自动：
 ### 5. 确认结果
 
 - Actions 运行成功，摘要里能看到 Worker 地址（形如 `https://lowendtalk-cloudflare-monitor.<你的子域>.workers.dev`）。
-- 浏览器打开该地址的 `/healthz`，返回 `{"ok":true}`。
+- 浏览器打开该地址的 `/healthz`，返回 `{"ok":true}`。启用 Access 后需先登录。
 - 触发器首次创建或修改[最多需要 15 分钟传播](https://developers.cloudflare.com/workers/configuration/cron-triggers/)；传播完成后才会在下一个整点运行。
 
 在 dashboard 的 **Workers & Pages → 你的 Worker** 可以确认绑定与触发器状态：
@@ -293,3 +294,48 @@ npm run types      # 改完 wrangler.jsonc 后重新生成 Env 类型
 npm run dev        # 本地启动（Workers AI 绑定走远端，会产生用量计费）
 npx wrangler tail  # 看线上日志
 ```
+
+---
+
+## 八、网页管理端
+
+打开 Worker 根地址进入管理端。身份验证使用 **Cloudflare Access 的 Cloudflare 账号登录**，不设置项目密码。
+
+### 启用访问验证
+
+1. 在部署 Worker 的账号启用 [Zero Trust](https://developers.cloudflare.com/cloudflare-one/setup/)。
+2. 打开 **Workers & Pages → 你的 Worker → Access → Protect this Worker behind Access**。
+3. 保护范围选择 **All traffic**，认证策略选择 **Cloudflare account**，点击 **Apply Access**。
+4. 访问 Worker 根地址，用该 Cloudflare 账号的成员身份登录。
+
+完整设置见 [Cloudflare Access for Workers](https://developers.cloudflare.com/workers/configuration/cloudflare-access/)。Access 保护 Worker 的生产域名与预览地址；管理页面及 API 还会检查平台提供的认证身份，未认证请求返回 `403`。Cron 定时任务不需要网页登录。
+
+### 页面功能
+
+| 功能 | 行为 |
+|---|---|
+| 概览 | 查看已处理数量、上次成功写入状态的时间、推送间隔、模型与已配置的发信通道 |
+| 已处理记录 | 查看去重 URL，按最近处理顺序分页；已处理不等于已发送邮件 |
+| 运行日志 | 查看定时任务及网页测试的完成结果、执行账号和日志明细；运行列表与明细分别分页 |
+| RSS 测试 | 抓取并解析当前源，显示条数及最新标题，不发信 |
+| AI 单篇预览 | 分析窗口内最新一帖，忽略去重，在隔离页面显示邮件预览；不发信、不改去重状态 |
+| 测试邮件 | 再次确认后，通过全部已配置通道向配置中的收件地址发信；不改去重状态 |
+
+每页可选 20、50、100 条，接口最多返回 100 条。已处理记录沿用现有最多 5,000 个 URL 的去重状态。运行日志保存到同一个 `STATE` KV，保留 30 天；每次完成后保存，最多 300 条消息，每条最多 2,000 字符，超出部分标记截断。旧版未持久化的日志不会补录。
+
+KV 跨节点同步可能延迟，刚完成的任务可稍后刷新查看。测试执行时保持页面连接；页面不会自动重试发送邮件。
+
+### 本地验证身份
+
+`wrangler dev` 默认没有 Access 身份，管理端会返回 `403`。本地调试可在 Wrangler 配置中临时加入：
+
+```jsonc
+"access": {
+  "dev": {
+    "aud": "local-console",
+    "identity": { "email": "dev@example.com" }
+  }
+}
+```
+
+该配置仅模拟本地身份，不能代替线上 Access 策略。

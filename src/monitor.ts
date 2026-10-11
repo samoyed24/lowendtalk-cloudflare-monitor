@@ -1,7 +1,7 @@
 // LowEndTalk 低价监控 —— 纯流水线逻辑（无 Worker API，可单元测试）。
 //
 // 抓取 → 解析 → AI 打标 → 整理 → 去重 → 发信 → 存状态。
-// Worker 绑定（KV / Workers AI）的接线在 index.ts。
+// Worker 绑定（KV / Workers AI）的接线在 runtime.ts。
 
 import { sendSmtpMail } from "./smtp";
 import type { SmtpDialer } from "./smtp";
