@@ -66,7 +66,7 @@ export interface FeedData {
 	items: unknown[];
 }
 
-const UA = "lowendtalk-lowprice-monitor/1.0 (+https://github.com/samoyed24)";
+const UA = "lowendtalk-cloudflare-monitor/1.0 (+https://github.com/samoyed24)";
 const STATE_MAX = 5000;
 // 「距上次运行是否满 INTERVAL_MINUTES」允许的提前量：cron 派发本身有抖动，
 // 取 5 分钟远小于最小 cron 周期（30 分钟），不会让两个相邻周期都放行。

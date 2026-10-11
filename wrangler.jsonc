@@ -5,7 +5,7 @@
 	"triggers": {
 		"crons": ["0 * * * *"]
 	},
-	"name": "let-lowprice-monitor",
+	"name": "lowendtalk-cloudflare-monitor",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-10-10",
 	"compatibility_flags": ["nodejs_compat"],

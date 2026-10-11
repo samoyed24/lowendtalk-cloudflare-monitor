@@ -1,4 +1,4 @@
-# lowendtalk-lowprice-monitor
+# lowendtalk-cloudflare-monitor
 
 定时抓取 [LowEndTalk](https://lowendtalk.com) 的 Offers 板块，用 Workers AI 打标签并生成中文摘要，去重后把新增条目邮件推送。
 
@@ -103,7 +103,7 @@ workflow 会自动：
 
 ### 5. 确认结果
 
-- Actions 运行成功，摘要里能看到 Worker 地址（形如 `https://let-lowprice-monitor.<你的子域>.workers.dev`）。
+- Actions 运行成功，摘要里能看到 Worker 地址（形如 `https://lowendtalk-cloudflare-monitor.<你的子域>.workers.dev`）。
 - 浏览器打开该地址的 `/healthz`，返回 `{"ok":true}`。
 - 触发器首次创建或修改[最多需要 15 分钟传播](https://developers.cloudflare.com/workers/configuration/cron-triggers/)；传播完成后才会在下一个整点运行。
 
@@ -242,7 +242,7 @@ workflow 会自动：
 
 | 输入 | 说明 |
 |---|---|
-| `confirm` | **必须**原样输入 `delete-let-monitor`，否则拒绝执行 |
+| `confirm` | **必须**原样输入 `delete-lowendtalk-cloudflare-monitor`，否则拒绝执行 |
 
 用的是同一套 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`（与部署共用）。
 
@@ -266,7 +266,7 @@ workflow 会：
 
 ```bash
 CLOUDFLARE_ACCOUNT_ID=<Account ID> CLOUDFLARE_API_TOKEN=<Token> \
-  node scripts/teardown.mjs --confirm=delete-let-monitor
+  node scripts/teardown.mjs --confirm=delete-lowendtalk-cloudflare-monitor
 ```
 
 ---
@@ -276,8 +276,8 @@ CLOUDFLARE_ACCOUNT_ID=<Account ID> CLOUDFLARE_API_TOKEN=<Token> \
 前置：`node >= 18`、已登录的 wrangler（`npx wrangler login`）。
 
 ```bash
-git clone https://github.com/samoyed24/lowendtalk-lowprice-monitor.git
-cd lowendtalk-lowprice-monitor
+git clone https://github.com/samoyed24/lowendtalk-cloudflare-monitor.git
+cd lowendtalk-cloudflare-monitor
 npm install
 ```
 
@@ -296,7 +296,7 @@ npx wrangler secret put NOTIFY_TO
 npm run deploy
 ```
 
-> `wrangler.jsonc` 里默认**不写死 KV id**，是为了让 fork 后能直接部署。若直接 `npm run deploy` 而不先跑 `resolve-kv.sh`，wrangler 4.45+ 的自动 provisioning 会新建一个名为 `<worker 名>-state`（即 `let-lowprice-monitor-state`）的 KV 并绑定，与 `LET_STATE` 不是同一个，去重状态从零开始。所以本地部署请先执行第 1 步；GitHub Actions 流程里这一步已自动完成。
+> `wrangler.jsonc` 里默认**不写死 KV id**，是为了让 fork 后能直接部署。若直接 `npm run deploy` 而不先跑 `resolve-kv.sh`，wrangler 4.45+ 的自动 provisioning 会新建一个名为 `<worker 名>-state`（即 `lowendtalk-cloudflare-monitor-state`）的 KV 并绑定，与 `LET_STATE` 不是同一个，去重状态从零开始。所以本地部署请先执行第 1 步；GitHub Actions 流程里这一步已自动完成。
 
 ### 本地调试
 

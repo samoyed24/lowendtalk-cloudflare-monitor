@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: '输入确认串 delete-let-monitor 以执行删除'
+        description: '输入确认串 delete-lowendtalk-cloudflare-monitor 以执行删除'
         required: true
         type: string
 

@@ -2,7 +2,7 @@
 //
 // 用法（在仓库根目录执行）：
 //   CLOUDFLARE_API_TOKEN=xxx CLOUDFLARE_ACCOUNT_ID=yyy \
-//     node scripts/teardown.mjs --confirm=delete-let-monitor [--config=wrangler.jsonc]
+//     node scripts/teardown.mjs --confirm=delete-lowendtalk-cloudflare-monitor [--config=wrangler.jsonc]
 //
 // 安全设计：
 //   · --confirm 必须是固定确认串 CONFIRM_PHRASE，防止误触发。
@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 
 /** 固定确认串：必须原样传入才会执行删除。 */
-export const CONFIRM_PHRASE = "delete-let-monitor";
+export const CONFIRM_PHRASE = "delete-lowendtalk-cloudflare-monitor";
 
 const args = process.argv.slice(2);
 const confirm = args.find((a) => a.startsWith("--confirm="))?.slice("--confirm=".length) ?? "";

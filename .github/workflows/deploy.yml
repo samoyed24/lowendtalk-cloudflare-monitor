@@ -110,7 +110,7 @@ jobs:
         run: |
           echo "### 部署完成 🎉" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Worker: let-lowprice-monitor" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Worker: lowendtalk-cloudflare-monitor" >> "$GITHUB_STEP_SUMMARY"
           if [ -n "$DEPLOY_URL" ]; then
             echo "- 地址: $DEPLOY_URL" >> "$GITHUB_STEP_SUMMARY"
             echo "- 健康检查: 浏览器打开 $DEPLOY_URL/healthz 应返回 ok true" >> "$GITHUB_STEP_SUMMARY"
