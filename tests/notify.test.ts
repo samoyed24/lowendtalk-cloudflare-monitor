@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import {
 	PortcloudUnconfirmed,
-	sendViaPortcloud,
+	sendViaPortcloudNotify,
 } from "../src/monitor";
 import type { Deps, MonitorConfig } from "../src/monitor";
 function cfg(timeout = 60): MonitorConfig {
@@ -96,7 +96,7 @@ function harness(responses: { post?: Response | Error; gets?: (Response | Error)
 }
 
 const send = (h: Harness, c?: MonitorConfig) =>
-	sendViaPortcloud("s", "<p>h</p>", "t", c ?? cfg(), h.deps());
+	sendViaPortcloudNotify("s", "<p>h</p>", "t", c ?? cfg(), h.deps());
 
 describe("success", () => {
 	it("首次轮询在受理 1 秒后，且只 sleep 一次", async () => {

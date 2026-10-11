@@ -13,7 +13,7 @@ export interface MonitorConfig {
 	requireServerTag: boolean;
 	intervalMinutes: number;
 	aiModel: string;
-	// AgentNotify（托管发信）：notify* 为主，pc* 兼容保留。
+	// Portcloud Notify（托管发信）：notify* 为主，pc* 兼容保留。
 	notifyUrl: string;
 	notifyKey: string;
 	notifyTo: string;
@@ -546,7 +546,7 @@ export function buildText(items: Item[]): string {
 	return lines.join("\n").trim();
 }
 
-// ---------------------------------------------------------------- AgentNotify 投递
+// ---------------------------------------------------------------- Portcloud Notify 投递
 
 const NOTIFY_KNOWN_STATUS: Record<string, true> = {
 	queued: true,
@@ -588,7 +588,7 @@ async function notifyPollOnce(
 		const remaining = deadlineMs - nowMs();
 		if (remaining <= 0) {
 			throw new NotifyUnconfirmed(
-				`AgentNotify 状态轮询超出预算（log_id=${logId}，投递结果未知）：${last || "预算耗尽"}`,
+				`Portcloud Notify 状态轮询超出预算（log_id=${logId}，投递结果未知）：${last || "预算耗尽"}`,
 			);
 		}
 		try {
@@ -599,13 +599,13 @@ async function notifyPollOnce(
 			if (r.status === 200) {
 				const data: unknown = await r.json().catch((exc: unknown) => {
 					throw new NotifyUnconfirmed(
-						`AgentNotify 状态响应非 JSON（HTTP 200，log_id=${logId}，投递结果未知）`,
+						`Portcloud Notify 状态响应非 JSON（HTTP 200，log_id=${logId}，投递结果未知）`,
 						{ cause: exc },
 					);
 				});
 				if (typeof data !== "object" || data === null || !("log_id" in data) || !("status" in data)) {
 					throw new NotifyUnconfirmed(
-						`AgentNotify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
+						`Portcloud Notify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
 					);
 				}
 				const gotId: unknown = data.log_id;
@@ -618,7 +618,7 @@ async function notifyPollOnce(
 					NOTIFY_KNOWN_STATUS[status] !== true
 				) {
 					throw new NotifyUnconfirmed(
-						`AgentNotify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
+						`Portcloud Notify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
 					);
 				}
 				const reason: unknown = "failure_reason" in data ? data.failure_reason : null;
@@ -626,7 +626,7 @@ async function notifyPollOnce(
 			}
 			if (r.status !== 429 && r.status < 500) {
 				throw new NotifyUnconfirmed(
-					`AgentNotify 状态查询被拒: HTTP ${r.status}（log_id=${logId}，投递结果未知）`,
+					`Portcloud Notify 状态查询被拒: HTTP ${r.status}（log_id=${logId}，投递结果未知）`,
 				);
 			}
 			last = `HTTP ${r.status}`;
@@ -638,7 +638,7 @@ async function notifyPollOnce(
 				last = `${name}: ${errMsg(exc).slice(0, 120)}`;
 			} else {
 				throw new NotifyUnconfirmed(
-					`AgentNotify 状态查询异常（log_id=${logId}，投递结果未知）：${name}: ${errMsg(exc).slice(0, 120)}`,
+					`Portcloud Notify 状态查询异常（log_id=${logId}，投递结果未知）：${name}: ${errMsg(exc).slice(0, 120)}`,
 					{ cause: exc },
 				);
 			}
@@ -646,14 +646,14 @@ async function notifyPollOnce(
 		const remaining2 = deadlineMs - nowMs();
 		if (remaining2 <= 0) {
 			throw new NotifyUnconfirmed(
-				`AgentNotify 状态轮询超出预算（log_id=${logId}，投递结果未知）：${last || "预算耗尽"}`,
+				`Portcloud Notify 状态轮询超出预算（log_id=${logId}，投递结果未知）：${last || "预算耗尽"}`,
 			);
 		}
 		await sleep(Math.min(NOTIFY_POLL_INTERVAL_MS, remaining2));
 	}
 }
 
-export async function sendViaAgentNotify(
+export async function sendViaPortcloudNotify(
 	subject: string,
 	htmlBody: string,
 	textBody: string,
@@ -671,7 +671,7 @@ export async function sendViaAgentNotify(
 		});
 	const fetchImpl = d.fetchImpl ?? fetch;
 	if (!cfg.notifyKey || !cfg.notifyTo) {
-		throw new Error("未配置 AgentNotify 通道。请设置 NOTIFY_KEY + NOTIFY_TO secrets");
+		throw new Error("未配置 Portcloud Notify 通道。请设置 NOTIFY_KEY + NOTIFY_TO secrets");
 	}
 	const payload = { to: cfg.notifyTo, subject, text: textBody, html: htmlBody };
 	let r: Response;
@@ -688,56 +688,55 @@ export async function sendViaAgentNotify(
 		});
 	} catch (exc) {
 		throw new NotifyUnconfirmed(
-			`AgentNotify 受理请求失败（投递结果未知）：${errName(exc)}: ${errMsg(exc).slice(0, 120)}`,
+			`Portcloud Notify 受理请求失败（投递结果未知）：${errName(exc)}: ${errMsg(exc).slice(0, 120)}`,
 			{ cause: exc },
 		);
 	}
 	if (r.status !== 201) {
 		const body = await r.text().catch(() => "");
-		throw new Error(`AgentNotify 受理失败: HTTP ${r.status} — ${body.slice(0, 200)}`);
+		throw new Error(`Portcloud Notify 受理失败: HTTP ${r.status} — ${body.slice(0, 200)}`);
 	}
 	const data: unknown = await r.json().catch(async () => {
 		const body = await r.text().catch(() => "");
 		throw new NotifyUnconfirmed(
-			`AgentNotify 受理响应非 JSON（HTTP 201，投递结果未知）: ${body.slice(0, 200)}`,
+			`Portcloud Notify 受理响应非 JSON（HTTP 201，投递结果未知）: ${body.slice(0, 200)}`,
 		);
 	});
 	if (typeof data !== "object" || data === null || !("log_id" in data)) {
 		throw new NotifyUnconfirmed(
-			`AgentNotify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
+			`Portcloud Notify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
 		);
 	}
 	const logId: unknown = data.log_id;
 	if (typeof logId !== "number" || !Number.isInteger(logId) || logId <= 0) {
 		throw new NotifyUnconfirmed(
-			`AgentNotify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
+			`Portcloud Notify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
 		);
 	}
 	// ---- 轮询：预算自受理成功起计，首次 1 秒后，之后每 1 秒一次 ----
 	const deadlineMs = nowMs() + cfg.notifyTimeout * 1000;
-	log(`AgentNotify 已受理（log_id=${logId}），轮询投递结果，预算 ${cfg.notifyTimeout}s`);
+	log(`Portcloud Notify 已受理（log_id=${logId}），轮询投递结果，预算 ${cfg.notifyTimeout}s`);
 	for (;;) {
 		const remaining = deadlineMs - nowMs();
 		if (remaining <= 0) {
 			throw new NotifyUnconfirmed(
-				`AgentNotify 轮询超时（${cfg.notifyTimeout}s，log_id=${logId}，投递结果未知）`,
+				`Portcloud Notify 轮询超时（${cfg.notifyTimeout}s，log_id=${logId}，投递结果未知）`,
 			);
 		}
 		await sleep(Math.min(NOTIFY_POLL_INTERVAL_MS, remaining));
 		const { status, reason } = await notifyPollOnce(logId, cfg, deadlineMs, d);
 		if (status === "success") {
-			log(`邮件已发送（AgentNotify）→ ${cfg.notifyTo}（log_id=${logId}）`);
+			log(`邮件已发送（Portcloud Notify）→ ${cfg.notifyTo}（log_id=${logId}）`);
 			return;
 		}
 		if (status === "failed" || status === "rejected") {
-			throw new Error(`AgentNotify 投递${status}（log_id=${logId}）：${reason || "服务端未提供原因"}`);
+			throw new Error(`Portcloud Notify 投递${status}（log_id=${logId}）：${reason || "服务端未提供原因"}`);
 		}
 		// queued / sending：继续等下一次轮询。
 	}
 }
 
 /** 兼容旧名。 */
-export const sendViaPortcloud = sendViaAgentNotify;
 
 export function hasNotifyChannel(cfg: MonitorConfig): boolean {
 	return cfg.notifyKey !== "" && cfg.notifyTo !== "";
@@ -784,14 +783,14 @@ export async function sendMail(
 ): Promise<void> {
 	const channels: (() => Promise<void>)[] = [];
 	if (hasNotifyChannel(cfg)) {
-		channels.push(() => sendViaAgentNotify(subject, htmlBody, textBody, cfg, d));
+		channels.push(() => sendViaPortcloudNotify(subject, htmlBody, textBody, cfg, d));
 	}
 	if (hasSmtpChannel(cfg)) {
 		channels.push(() => sendViaSmtp(subject, htmlBody, textBody, cfg, d));
 	}
 	if (channels.length === 0) {
 		throw new Error(
-			"未配置任何发送通道。请设置 NOTIFY_KEY + NOTIFY_TO（推荐 AgentNotify），" +
+			"未配置任何发送通道。请设置 NOTIFY_KEY + NOTIFY_TO（推荐 Portcloud Notify），" +
 				"或 SMTP_USER + SMTP_PASS + MAIL_TO（自定义 SMTP）",
 		);
 	}

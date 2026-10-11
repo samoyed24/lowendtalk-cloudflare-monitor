@@ -3,7 +3,7 @@
 // 定时：wrangler.jsonc 的 triggers.crons（默认 0 * * * *，UTC）。
 // 状态：STATE KV（sent 已推送 URL + lastRun），替代原来 Actions cache 的状态文件。
 // AI：Workers AI 绑定（env.AI），不再接外部 LLM 接口。
-// 发信：AgentNotify（推荐）与自定义 SMTP 双通道，至少配一个，都配则同时发送。
+// 发信：Portcloud Notify（推荐）与自定义 SMTP 双通道，至少配一个，都配则同时发送。
 
 import { buildAlert, runPipeline, sendMail } from "./monitor";
 import type { Deps, MonitorConfig, PipelineState, RunHandlers } from "./monitor";

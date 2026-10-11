@@ -331,7 +331,7 @@ describe("sendMail 双通道", () => {
 		return () => (t += 2000);
 	}
 
-	it("只配 AgentNotify 则只走 AgentNotify", async () => {
+	it("只配 Portcloud Notify 则只走 Portcloud Notify", async () => {
 		const { sendMail } = await import("../src/monitor");
 		const order: string[] = [];
 		await sendMail("s", "h", "t", cfg(), {

@@ -2,7 +2,7 @@
 
 定时抓取 [LowEndTalk](https://lowendtalk.com) 的 Offers 板块，用 Workers AI 打标签并生成中文摘要，去重后把新增条目邮件推送。
 
-跑在 **Cloudflare Worker Cron** 上：定时唤醒 → 抓取 → AI 打标 → 去重 → 发信。状态存在 KV，AI 走 Workers AI 绑定，发信走 AgentNotify（推荐）或自定义 SMTP。
+跑在 **Cloudflare Worker Cron** 上：定时唤醒 → 抓取 → AI 打标 → 去重 → 发信。状态存在 KV，AI 走 Workers AI 绑定，发信走 Portcloud Notify（推荐）或自定义 SMTP。
 
 ---
 
@@ -52,8 +52,6 @@
 - **Your API Token**：只显示这一次，务必当场复制，关掉后无法再查看。
 - **Account ID**：就在同一页上方，直接复制。
 
-> 同一页面下方的 `Access Key ID` / `Secret Access Key` 是 R2 的 S3 凭证，**本项目用不到**，不要填进 GitHub Secrets。
-
 ### 3. 在 fork 的仓库里填 Secrets
 
 **Settings → Secrets and variables → Actions → New repository secret**。
@@ -71,13 +69,14 @@
 
 | 名称 | 必填 | 说明 |
 |---|---|---|
-| `NOTIFY_KEY` | 通道 1 | AgentNotify API Key，形如 `pck_xxx` |
+| `NOTIFY_KEY` | 通道 1 | Portcloud Notify API Key，形如 `pck_xxx` |
 | `NOTIFY_TO` | 通道 1 | 收件邮箱（须与控制台验证过的地址一致） |
 | `SMTP_USER` | 通道 2 | 发件邮箱，如 `you@qq.com` |
 | `SMTP_PASS` | 通道 2 | 邮箱授权码（不是登录密码） |
 | `MAIL_TO` | 通道 2 | 收件邮箱 |
 
-> **通道 1（AgentNotify，推荐）**：给本项目仓库点个 Star，再到 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录，添加并验证接收邮箱，然后申请一个 API Key 就能用（明文只展示一次）。不点 Star 调用会返回 `403 STAR_REQUIRED`。
+> **通道 1（Portcloud Notify，推荐）**：给本项目仓库点个 Star，再到 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录，添加并验证接收邮箱，然后申请一个 API Key 就能用。不点 Star 调用会返回 `403 STAR_REQUIRED`。
+>
 > **通道 2（自建 SMTP）**：要自己准备邮箱、授权码、端口和 TLS 模式，配起来更麻烦，除非你已经有稳定的发信服务，否则优先用通道 1。
 
 ### 4. 运行 workflow
@@ -141,7 +140,7 @@ workflow 会自动：
 
 | Secret | 必填 | 说明 |
 |---|---|---|
-| `NOTIFY_KEY` | 通道 1 | AgentNotify API Key，形如 `pck_xxx`（兼容旧 `PC_KEY`） |
+| `NOTIFY_KEY` | 通道 1 | Portcloud Notify API Key，形如 `pck_xxx`（兼容旧 `PC_KEY`） |
 | `NOTIFY_TO` | 通道 1 | 收件邮箱（与控制台验证过的地址一致；兼容旧 `PC_TO`） |
 | `SMTP_USER` | 通道 2 | 发件邮箱，如 `you@qq.com` |
 | `SMTP_PASS` | 通道 2 | 邮箱授权码（不是登录密码） |
@@ -160,12 +159,10 @@ workflow 会自动：
 | `CLASSIFY_BATCH_SIZE` | `1` | 单次 AI 分类的条数；完整正文默认每次 1 帖，避免多篇长文挤占上下文。调大会减少调用次数，但更容易超出模型限制 |
 | `REQUIRE_SERVER_TAG` | `true` | 只推送带服务器类型标签的条目 |
 | `INTERVAL_MINUTES` | `60` | 推送间隔（分钟），与 cron 保持一致 |
-| `NOTIFY_URL` | `https://notify.portcloud.online` | AgentNotify API 地址（兼容旧 `PC_URL`） |
-| `NOTIFY_TIMEOUT` | `60` | AgentNotify 轮询投递结果的总预算（秒），须为正整数（兼容旧 `PC_TIMEOUT`） |
+| `NOTIFY_URL` | `https://notify.portcloud.online` | Portcloud Notify API 地址（兼容旧 `PC_URL`） |
+| `NOTIFY_TIMEOUT` | `60` | Portcloud Notify 轮询投递结果的总预算（秒），须为正整数（兼容旧 `PC_TIMEOUT`） |
 | `SMTP_HOST` | `smtp.qq.com` | 自定义 SMTP 服务器 |
 | `SMTP_PORT` | `465` | 465（隐式 TLS）或 587（STARTTLS）；25 被 Cloudflare 禁止 |
-
-> **异步两段式投递**（AgentNotify）：`POST /api/v1/send` 只受理（返回 `201` + `log_id`），程序在受理后等待 1 秒，再用 `GET /api/v1/send/{log_id}` 每隔 1 秒轮询，直到 `success` / `failed` / `rejected`。受理只请求一次、**不重试发送**（重试可能重复投递）；受理后的轮询预算由 `NOTIFY_TIMEOUT`（默认 60 秒）控制。短暂查询网络错误、HTTP 429 / 5xx 会在预算内继续查询。超时或无法确认状态时，报「投递结果未知」并且不保存状态，不代表邮件一定未送达；后续运行可能再次发送未记入状态的内容，产生重复邮件，可根据报错中的 `log_id` 在控制台核对。
 
 ### 可选 Repository Variable
 
@@ -210,7 +207,7 @@ workflow 会自动：
            └─ 打标 Workers AI（env.AI）输出 tags + prices + 中文摘要
               └─ 整理 按最低月均价排序
                  └─ 去重 与 KV 状态比对，取新增
-                    └─ 发信 有新增才发送（AgentNotify / 自定义 SMTP，配了几个发几个）
+                    └─ 发信 有新增才发送（Portcloud Notify / 自定义 SMTP，配了几个发几个）
                        └─ 存状态（KV）
 ```
 
@@ -253,15 +250,6 @@ workflow 会：
 3. 删除 Worker（含 Cron 触发器）；
 4. 删除该 Worker 绑定的 KV namespace。
 
-**安全设计**（`scripts/teardown.mjs`）：
-
-- 只删除**该 Worker 的绑定里真实引用**的 KV，**绝不按名字猜**。
-- 删除前检查该 KV 是否仍被**其它 Worker** 引用；被引用则跳过并告警——多个部署共用同一个 KV 时，删掉其中一个不会影响其它。
-- 删 Worker 是幂等的：已经不存在时继续清理它名下的 `<worker>-state`。
-
-> **注意**：删掉 KV 会永久丢失去重状态。之后重新部署，首次运行会把窗口内（默认 7 天）的帖子当新帖重推一次。
-> 只是想**暂停**而不是卸载？去 dashboard 的 Workers → Settings → Triggers 关掉 Cron 触发器即可，Worker 与 KV 都留着。
-
 本地也可以直接跑（不经过 GitHub Actions）：
 
 ```bash
@@ -296,8 +284,6 @@ npx wrangler secret put NOTIFY_TO
 npm run deploy
 ```
 
-> `wrangler.jsonc` 里默认**不写死 KV id**，是为了让 fork 后能直接部署。若直接 `npm run deploy` 而不先跑 `resolve-kv.sh`，wrangler 4.45+ 的自动 provisioning 会新建一个名为 `<worker 名>-state`（即 `lowendtalk-cloudflare-monitor-state`）的 KV 并绑定，与 `LET_STATE` 不是同一个，去重状态从零开始。所以本地部署请先执行第 1 步；GitHub Actions 流程里这一步已自动完成。
-
 ### 本地调试
 
 ```bash
@@ -307,5 +293,3 @@ npm run types      # 改完 wrangler.jsonc 后重新生成 Env 类型
 npm run dev        # 本地启动（Workers AI 绑定走远端，会产生用量计费）
 npx wrangler tail  # 看线上日志
 ```
-
-> Workers AI 在本地开发时也是远端调用，会产生用量费用。
