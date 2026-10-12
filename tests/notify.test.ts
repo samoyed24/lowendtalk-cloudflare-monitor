@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 import {
-	PortcloudUnconfirmed,
+	NotifyUnconfirmed,
+	hasNotifyChannel,
 	sendViaPortcloudNotify,
 } from "../src/monitor";
 import type { Deps, MonitorConfig } from "../src/monitor";
@@ -17,6 +18,8 @@ function cfg(timeout = 60): MonitorConfig {
 		notifyUrl: "https://notify.portcloud.online",
 		notifyKey: "k",
 		notifyTo: "to@example.com",
+		notifyUsePreset: false,
+		notifyType: "email",
 		notifyTimeout: timeout,
 		smtpHost: "",
 		smtpPort: 465,
@@ -63,7 +66,7 @@ function harness(responses: { post?: Response | Error; gets?: (Response | Error)
 	const gets = [...(responses.gets ?? [])];
 	const inner = vi.fn(async (url: string, init?: RequestInit) => {
 		calls.push({ url, init: init ?? {} });
-		if (String(url).endsWith("/api/v1/send")) {
+		if (init?.method === "POST") {
 			if (responses.post instanceof Error) throw responses.post;
 			if (responses.post !== undefined) return responses.post;
 			return jsonResponse(201, { log_id: 7, status: "queued" });
@@ -90,13 +93,13 @@ function harness(responses: { post?: Response | Error; gets?: (Response | Error)
 			nowMs: () => now,
 			log: () => {},
 		}),
-		postCalls: () => calls.filter((c) => String(c.url).endsWith("/api/v1/send")),
-		getCalls: () => calls.filter((c) => !String(c.url).endsWith("/api/v1/send")),
+		postCalls: () => calls.filter((c) => c.init.method === "POST"),
+		getCalls: () => calls.filter((c) => c.init.method !== "POST"),
 	};
 }
 
 const send = (h: Harness, c?: MonitorConfig) =>
-	sendViaPortcloudNotify("s", "<p>h</p>", "t", c ?? cfg(), h.deps());
+	sendViaPortcloudNotify("s", "t", c ?? cfg(), h.deps());
 
 describe("success", () => {
 	it("首次轮询在受理 1 秒后，且只 sleep 一次", async () => {
@@ -122,7 +125,7 @@ describe("success", () => {
 		expect(h.sleeps).toEqual([1, 1, 1]);
 	});
 
-	it("受理只 POST 一次，payload 带 to/html/text", async () => {
+	it("email 受理只 POST 一次，发送 type/to/title/body", async () => {
 		const h = harness({
 			post: jsonResponse(201, { log_id: 3 }),
 			gets: [jsonResponse(200, statusPayload(3, "queued")), jsonResponse(200, statusPayload(3, "success"))],
@@ -130,9 +133,56 @@ describe("success", () => {
 		await send(h);
 		expect(h.postCalls()).toHaveLength(1);
 		const payload = JSON.parse(String(h.postCalls()[0]?.init.body)) as Record<string, unknown>;
-		expect(payload.to).toBe("to@example.com");
-		expect(payload).toHaveProperty("html");
-		expect(payload).toHaveProperty("text");
+		expect(h.postCalls()[0]?.url).toBe("https://notify.portcloud.online/api/v1/send");
+		expect(payload).toEqual({ type: "email", to: "to@example.com", title: "s", body: "t" });
+	});
+
+	it("ntfy 使用完整 topic，投递成功日志不称为邮件", async () => {
+		const h = harness({});
+		const c = cfg();
+		c.notifyType = "ntfy";
+		c.notifyTo = "https://ntfy.example.com/let-monitor";
+		const logs: string[] = [];
+		await sendViaPortcloudNotify("s", "t", c, { ...h.deps(), log: (msg) => logs.push(msg) });
+		expect(h.postCalls()).toHaveLength(1);
+		expect(JSON.parse(String(h.postCalls()[0]?.init.body))).toEqual({
+			type: "ntfy", to: c.notifyTo, title: "s", body: "t",
+		});
+		expect(h.getCalls()).toHaveLength(1);
+		expect(logs.at(-1)).toContain(`ntfy: ${c.notifyTo}`);
+		expect(logs.at(-1)).not.toContain("邮件");
+	});
+
+	it("preset 忽略空目标和非法 type，仅发送内容并轮询原状态端点", async () => {
+		const h = harness({
+			post: jsonResponse(201, { preset_id: 2, log_id: 11, status: "queued" }),
+			gets: [
+				jsonResponse(200, statusPayload(11, "sending")),
+				jsonResponse(200, statusPayload(11, "success")),
+			],
+		});
+		const c = cfg();
+		Object.assign(c, { notifyUsePreset: true, notifyTo: "", notifyType: "invalid" });
+		const logs: string[] = [];
+		await sendViaPortcloudNotify("s", "t", c, { ...h.deps(), log: (msg) => logs.push(msg) });
+		expect(hasNotifyChannel(c)).toBe(true);
+		expect(h.postCalls()).toHaveLength(1);
+		expect(h.postCalls()[0]?.url).toBe("https://notify.portcloud.online/api/v1/send-preset");
+		expect(JSON.parse(String(h.postCalls()[0]?.init.body))).toEqual({ title: "s", body: "t" });
+		expect(h.getCalls().map((call) => call.url)).toEqual([
+			"https://notify.portcloud.online/api/v1/send/11",
+			"https://notify.portcloud.online/api/v1/send/11",
+		]);
+		expect(h.sleeps).toEqual([1, 1]);
+		expect(logs.at(-1)).toContain("账号预设通知链");
+	});
+
+	it("preset 不发送已配置的显式目标", async () => {
+		const h = harness({});
+		const c = cfg();
+		c.notifyUsePreset = true;
+		await send(h, c);
+		expect(JSON.parse(String(h.postCalls()[0]?.init.body))).toEqual({ title: "s", body: "t" });
 	});
 });
 
@@ -144,7 +194,7 @@ describe("terminal failures", () => {
 		});
 		const err = await send(h).catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(Error);
-		expect(err).not.toBeInstanceOf(PortcloudUnconfirmed);
+		expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
 		expect(String((err as Error).message)).toContain("failed");
 		expect(String((err as Error).message)).toContain("smtp_timeout");
 		expect(String((err as Error).message)).toContain("42");
@@ -156,7 +206,7 @@ describe("terminal failures", () => {
 			gets: [jsonResponse(200, statusPayload(43, "rejected", "recipient_not_verified"))],
 		});
 		const err = await send(h).catch((e: unknown) => e);
-		expect(err).not.toBeInstanceOf(PortcloudUnconfirmed);
+		expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
 		expect(String((err as Error).message)).toContain("rejected");
 	});
 });
@@ -166,7 +216,7 @@ describe("budget and transient retry", () => {
 		const queued = () => jsonResponse(200, statusPayload(5, "queued"));
 		const h = harness({ post: jsonResponse(201, { log_id: 5 }), gets: [queued(), queued(), queued()] }, 3);
 		const err = await send(h, cfg(3)).catch((e: unknown) => e);
-		expect(err).toBeInstanceOf(PortcloudUnconfirmed);
+		expect(err).toBeInstanceOf(NotifyUnconfirmed);
 		expect(String((err as Error).message)).toContain("5");
 		expect(h.getCalls()).toHaveLength(2);
 		expect(h.sleeps).toEqual([1, 1, 1]);
@@ -196,7 +246,7 @@ describe("budget and transient retry", () => {
 				gets: [new Response("no", { status })],
 			});
 			const err = await send(h).catch((e: unknown) => e);
-			expect(err).toBeInstanceOf(PortcloudUnconfirmed);
+			expect(err).toBeInstanceOf(NotifyUnconfirmed);
 			expect(h.getCalls()).toHaveLength(1);
 		}
 	});
@@ -214,7 +264,7 @@ describe("malformed responses", () => {
 		for (const post of badPosts) {
 			const h = harness({ post });
 			const err = await send(h).catch((e: unknown) => e);
-			expect(err).toBeInstanceOf(PortcloudUnconfirmed);
+			expect(err).toBeInstanceOf(NotifyUnconfirmed);
 			expect(h.getCalls()).toHaveLength(0);
 		}
 	});
@@ -229,7 +279,7 @@ describe("malformed responses", () => {
 		for (const get of badGets) {
 			const h = harness({ post: jsonResponse(201, { log_id: 31 }), gets: [get] });
 			const err = await send(h).catch((e: unknown) => e);
-			expect(err).toBeInstanceOf(PortcloudUnconfirmed);
+			expect(err).toBeInstanceOf(NotifyUnconfirmed);
 		}
 	});
 });
@@ -239,7 +289,7 @@ describe("no post retry", () => {
 		for (const status of [403, 500]) {
 			const h = harness({ post: new Response("err", { status }) });
 			const err = await send(h).catch((e: unknown) => e);
-			expect(err).not.toBeInstanceOf(PortcloudUnconfirmed);
+			expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
 			expect(h.postCalls()).toHaveLength(1);
 			expect(h.getCalls()).toHaveLength(0);
 		}
@@ -248,8 +298,47 @@ describe("no post retry", () => {
 	it("受理连接错误判结果未知且只请求一次", async () => {
 		const h = harness({ post: new TypeError("refused") });
 		const err = await send(h).catch((e: unknown) => e);
-		expect(err).toBeInstanceOf(PortcloudUnconfirmed);
+		expect(err).toBeInstanceOf(NotifyUnconfirmed);
 		expect(h.postCalls()).toHaveLength(1);
 		expect(h.getCalls()).toHaveLength(0);
+	});
+});
+
+describe("preset errors and configuration", () => {
+	it("preset 服务拒绝时不重试，也不回退到显式发送", async () => {
+		const h = harness({
+			post: jsonResponse(400, { error: { code: "NO_PRESET", message: "No preset configured" } }),
+		});
+		const c = cfg();
+		c.notifyUsePreset = true;
+		await expect(send(h, c)).rejects.toThrow("NO_PRESET");
+		expect(h.postCalls().map((call) => call.url)).toEqual([
+			"https://notify.portcloud.online/api/v1/send-preset",
+		]);
+		expect(h.getCalls()).toHaveLength(0);
+	});
+
+	it("preset 连接错误保持结果未知，且只 POST 一次", async () => {
+		const h = harness({ post: new TypeError("connection lost") });
+		const c = cfg();
+		c.notifyUsePreset = true;
+		await expect(send(h, c)).rejects.toBeInstanceOf(NotifyUnconfirmed);
+		expect(h.postCalls().map((call) => call.url)).toEqual([
+			"https://notify.portcloud.online/api/v1/send-preset",
+		]);
+		expect(h.getCalls()).toHaveLength(0);
+	});
+
+	it("preset 缺 key 和显式模式缺目标均不发请求", async () => {
+		for (const c of [
+			Object.assign(cfg(), { notifyUsePreset: true, notifyKey: "", notifyTo: "" }),
+			Object.assign(cfg(), { notifyUsePreset: false, notifyTo: "" }),
+		]) {
+			const h = harness({});
+			expect(hasNotifyChannel(c)).toBe(false);
+			await expect(send(h, c)).rejects.toThrow("未配置 Portcloud Notify 通道");
+			expect(h.postCalls()).toHaveLength(0);
+			expect(h.getCalls()).toHaveLength(0);
+		}
 	});
 });

@@ -3,9 +3,11 @@ import {
 	dueSinceLastRun,
 	merge,
 	normalizePrices,
+	NotifyUnconfirmed,
 	parsePosts,
 	parseRssItems,
 	runPipeline,
+	sendMail,
 	type FeedData,
 	type MonitorConfig,
 	type PipelineState,
@@ -24,6 +26,8 @@ function cfg(over: Partial<MonitorConfig> = {}): MonitorConfig {
 		notifyUrl: "https://notify.portcloud.online",
 		notifyKey: "k",
 		notifyTo: "to@example.com",
+		notifyUsePreset: false,
+		notifyType: "email",
 		notifyTimeout: 60,
 		smtpHost: "",
 		smtpPort: 465,
@@ -313,17 +317,18 @@ describe("runPipeline 状态守卫", () => {
 });
 
 describe("sendMail 双通道", () => {
-	function notifyFetch(order: string[]) {
-		return (async (url: string) => {
-			if (String(url).endsWith("/api/v1/send")) {
+	function notifyFetch(order: string[], acceptance?: Response | Error, status = "success"): typeof fetch {
+		return async (_url, init) => {
+			if (init?.method === "POST") {
 				order.push("notify");
-				return new Response(JSON.stringify({ log_id: 1 }), { status: 201 });
+				if (acceptance instanceof Error) throw acceptance;
+				return acceptance ?? new Response(JSON.stringify({ log_id: 1 }), { status: 201 });
 			}
 			return new Response(
-				JSON.stringify({ log_id: 1, status: "success", failure_reason: null }),
+				JSON.stringify({ log_id: 1, status, failure_reason: status === "failed" ? "delivery refused" : null }),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		};
 	}
 
 	function tickClock() {
@@ -331,8 +336,47 @@ describe("sendMail 双通道", () => {
 		return () => (t += 2000);
 	}
 
+	const smtpConfig = {
+		smtpHost: "smtp.example.com",
+		smtpUser: "me@example.com",
+		smtpPass: "p",
+		smtpTo: "to@example.com",
+	};
+
+	function smtpDialer(order: string[], failure?: Error) {
+		return {
+			dial: async () => {
+				order.push("smtp");
+				if (failure) throw failure;
+				const script = [
+					{ code: 220, text: "ready" },
+					{ code: 250, text: "hello\nAUTH LOGIN" },
+					{ code: 334, text: "Username:" },
+					{ code: 334, text: "Password:" },
+					{ code: 235, text: "ok" },
+					{ code: 250, text: "ok" },
+					{ code: 250, text: "ok" },
+					{ code: 354, text: "go" },
+					{ code: 250, text: "queued" },
+					{ code: 221, text: "bye" },
+				];
+				return {
+					readResponse: async () => {
+						const next = script.shift();
+						if (!next) throw new Error("smtp script exhausted");
+						return next;
+					},
+					writeLine: async () => {},
+					writeData: async () => {},
+					upgradeTls: async () => {},
+					close: async () => {},
+				};
+			},
+		};
+	}
+
 	it("只配 Portcloud Notify 则只走 Portcloud Notify", async () => {
-		const { sendMail } = await import("../src/monitor");
+		
 		const order: string[] = [];
 		await sendMail("s", "h", "t", cfg(), {
 			fetchImpl: notifyFetch(order),
@@ -344,48 +388,97 @@ describe("sendMail 双通道", () => {
 	});
 
 	it("两个都配则同时发送", async () => {
-		const { sendMail } = await import("../src/monitor");
+		
 		const order: string[] = [];
-		const c = cfg({
-			smtpHost: "smtp.example.com",
-			smtpUser: "me@example.com",
-			smtpPass: "p",
-			smtpTo: "to@example.com",
-		});
+		const c = cfg(smtpConfig);
 		await sendMail("s", "h", "t", c, {
 			fetchImpl: notifyFetch(order),
 			sleep: async () => {},
 			nowMs: tickClock(),
 			log: () => {},
-			smtpDialer: {
-				dial: async () => {
-					order.push("smtp");
-					const script = [
-						{ code: 220, text: "ready" },
-						{ code: 250, text: "hello\nAUTH LOGIN" },
-						{ code: 334, text: "Username:" },
-						{ code: 334, text: "Password:" },
-						{ code: 235, text: "ok" },
-						{ code: 250, text: "ok" },
-						{ code: 250, text: "ok" },
-						{ code: 354, text: "go" },
-						{ code: 250, text: "queued" },
-						{ code: 221, text: "bye" },
-					];
-					return {
-						readResponse: async () => {
-							const next = script.shift();
-							if (!next) throw new Error("smtp script exhausted");
-							return next;
-						},
-						writeLine: async () => {},
-						writeData: async () => {},
-						upgradeTls: async () => {},
-						close: async () => {},
-					};
-				},
-			},
+			smtpDialer: smtpDialer(order),
 		});
+		expect(order).toEqual(["notify", "smtp"]);
+	});
+
+	it("preset 只配置 key 仍可发送，且不依赖 SMTP", async () => {
+		
+		const order: string[] = [];
+		await sendMail("s", "h", "t", cfg({ notifyUsePreset: true, notifyTo: "" }), {
+			fetchImpl: notifyFetch(order),
+			sleep: async () => {},
+			nowMs: tickClock(),
+			log: () => {},
+		});
+		expect(order).toEqual(["notify"]);
+	});
+
+	it("SMTP 独立配置时不尝试 Portcloud Notify", async () => {
+		
+		const order: string[] = [];
+		await sendMail("s", "h", "t", cfg({ ...smtpConfig, notifyKey: "", notifyTo: "" }), {
+			fetchImpl: notifyFetch(order),
+			smtpDialer: smtpDialer(order),
+			log: () => {},
+		});
+		expect(order).toEqual(["smtp"]);
+	});
+
+	for (const stage of ["acceptance", "delivery"] as const) {
+		it(`Portcloud Notify ${stage} 失败仍尝试 SMTP，随后传播失败`, async () => {
+			
+			const order: string[] = [];
+			const acceptance = stage === "acceptance" ? new Response("notify refused", { status: 403 }) : undefined;
+			await expect(sendMail("s", "h", "t", cfg(smtpConfig), {
+				fetchImpl: notifyFetch(order, acceptance, stage === "delivery" ? "failed" : "success"),
+				sleep: async () => {},
+				nowMs: tickClock(),
+				smtpDialer: smtpDialer(order),
+				log: () => {},
+			})).rejects.toThrow(stage === "acceptance" ? "HTTP 403" : "delivery refused");
+			expect(order).toEqual(["notify", "smtp"]);
+		});
+	}
+
+	it("NotifyUnconfirmed 不被 SMTP 成功掩盖，也不重试 POST", async () => {
+		
+		const order: string[] = [];
+		const networkError = new TypeError("connection lost");
+		const err = await sendMail("s", "h", "t", cfg(smtpConfig), {
+			fetchImpl: notifyFetch(order, networkError),
+			smtpDialer: smtpDialer(order),
+			log: () => {},
+		}).catch((error: unknown) => error);
+		expect(err).toBeInstanceOf(NotifyUnconfirmed);
+		expect((err as Error).cause).toBe(networkError);
+		expect(order).toEqual(["notify", "smtp"]);
+	});
+
+	it("两通道均失败时仍传播 NotifyUnconfirmed，而非 SMTP 错误", async () => {
+		
+		const order: string[] = [];
+		const networkError = new TypeError("connection lost");
+		const err = await sendMail("s", "h", "t", cfg(smtpConfig), {
+			fetchImpl: notifyFetch(order, networkError),
+			smtpDialer: smtpDialer(order, new Error("smtp unavailable")),
+			log: () => {},
+		}).catch((error: unknown) => error);
+		expect(err).toBeInstanceOf(NotifyUnconfirmed);
+		expect((err as Error).cause).toBe(networkError);
+		expect(order).toEqual(["notify", "smtp"]);
+	});
+
+	it("Portcloud Notify 成功不掩盖 SMTP 失败，保留原错误对象", async () => {
+		
+		const order: string[] = [];
+		const smtpError = new Error("smtp unavailable");
+		await expect(sendMail("s", "h", "t", cfg(smtpConfig), {
+			fetchImpl: notifyFetch(order),
+			sleep: async () => {},
+			nowMs: tickClock(),
+			smtpDialer: smtpDialer(order, smtpError),
+			log: () => {},
+		})).rejects.toBe(smtpError);
 		expect(order).toEqual(["notify", "smtp"]);
 	});
 });

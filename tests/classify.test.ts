@@ -22,6 +22,8 @@ function cfg(): MonitorConfig {
 		notifyUrl: "https://notify.portcloud.online",
 		notifyKey: "k",
 		notifyTo: "to@example.com",
+		notifyUsePreset: false,
+		notifyType: "email",
 		notifyTimeout: 60,
 		smtpHost: "",
 		smtpPort: 465,

@@ -13,10 +13,12 @@ export interface MonitorConfig {
 	requireServerTag: boolean;
 	intervalMinutes: number;
 	aiModel: string;
-	// Portcloud Notify（托管发信）：notify* 为主，pc* 兼容保留。
+	// Portcloud Notify（托管通知）。
 	notifyUrl: string;
 	notifyKey: string;
 	notifyTo: string;
+	notifyUsePreset: boolean;
+	notifyType: "email" | "ntfy";
 	notifyTimeout: number;
 	// 自定义 SMTP（二选一配一个即可；都配则同时发送）。
 	smtpHost: string;
@@ -557,8 +559,6 @@ const NOTIFY_KNOWN_STATUS: Record<string, true> = {
 };
 
 export class NotifyUnconfirmed extends Error {}
-/** 兼容旧名。 */
-export const PortcloudUnconfirmed = NotifyUnconfirmed;
 
 function errName(exc: unknown): string {
 	return exc instanceof Error ? exc.constructor.name : typeof exc;
@@ -655,7 +655,6 @@ async function notifyPollOnce(
 
 export async function sendViaPortcloudNotify(
 	subject: string,
-	htmlBody: string,
 	textBody: string,
 	cfg: MonitorConfig,
 	d: Deps = {},
@@ -670,13 +669,17 @@ export async function sendViaPortcloudNotify(
 			return promise;
 		});
 	const fetchImpl = d.fetchImpl ?? fetch;
-	if (!cfg.notifyKey || !cfg.notifyTo) {
-		throw new Error("未配置 Portcloud Notify 通道。请设置 NOTIFY_KEY + NOTIFY_TO secrets");
+	if (!hasNotifyChannel(cfg)) {
+		throw new Error("未配置 Portcloud Notify 通道。请设置 NOTIFY_KEY，并设置 NOTIFY_TO 或启用 NOTIFY_USE_PRESET");
 	}
-	const payload = { to: cfg.notifyTo, subject, text: textBody, html: htmlBody };
+	const payload = cfg.notifyUsePreset
+		? { title: subject, body: textBody }
+		: { type: cfg.notifyType, to: cfg.notifyTo, title: subject, body: textBody };
+	const route = cfg.notifyUsePreset ? "send-preset" : "send";
+	const target = cfg.notifyUsePreset ? "账号预设通知链" : `${cfg.notifyType}: ${cfg.notifyTo}`;
 	let r: Response;
 	try {
-		r = await fetchImpl(`${cfg.notifyUrl}/api/v1/send`, {
+		r = await fetchImpl(`${cfg.notifyUrl}/api/v1/${route}`, {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${cfg.notifyKey}`,
@@ -726,7 +729,7 @@ export async function sendViaPortcloudNotify(
 		await sleep(Math.min(NOTIFY_POLL_INTERVAL_MS, remaining));
 		const { status, reason } = await notifyPollOnce(logId, cfg, deadlineMs, d);
 		if (status === "success") {
-			log(`邮件已发送（Portcloud Notify）→ ${cfg.notifyTo}（log_id=${logId}）`);
+			log(`通知已发送（Portcloud Notify）→ ${target}（log_id=${logId}）`);
 			return;
 		}
 		if (status === "failed" || status === "rejected") {
@@ -736,10 +739,8 @@ export async function sendViaPortcloudNotify(
 	}
 }
 
-/** 兼容旧名。 */
-
 export function hasNotifyChannel(cfg: MonitorConfig): boolean {
-	return cfg.notifyKey !== "" && cfg.notifyTo !== "";
+	return cfg.notifyKey !== "" && (cfg.notifyUsePreset || cfg.notifyTo !== "");
 }
 
 export function hasSmtpChannel(cfg: MonitorConfig): boolean {
@@ -783,20 +784,28 @@ export async function sendMail(
 ): Promise<void> {
 	const channels: (() => Promise<void>)[] = [];
 	if (hasNotifyChannel(cfg)) {
-		channels.push(() => sendViaPortcloudNotify(subject, htmlBody, textBody, cfg, d));
+		channels.push(() => sendViaPortcloudNotify(subject, textBody, cfg, d));
 	}
 	if (hasSmtpChannel(cfg)) {
 		channels.push(() => sendViaSmtp(subject, htmlBody, textBody, cfg, d));
 	}
 	if (channels.length === 0) {
 		throw new Error(
-			"未配置任何发送通道。请设置 NOTIFY_KEY + NOTIFY_TO（推荐 Portcloud Notify），" +
+			"未配置任何发送通道。请设置 NOTIFY_KEY + NOTIFY_TO 或 NOTIFY_KEY + NOTIFY_USE_PRESET=true（Portcloud Notify），" +
 				"或 SMTP_USER + SMTP_PASS + MAIL_TO（自定义 SMTP）",
 		);
 	}
+	let failed = false;
+	let failure: unknown;
 	for (const send of channels) {
-		await send();
+		try {
+			await send();
+		} catch (exc) {
+			if (!failed || exc instanceof NotifyUnconfirmed) failure = exc;
+			failed = true;
+		}
 	}
+	if (failed) throw failure;
 }
 
 export function buildAlert(error: string, nowMs = Date.now()): { subject: string; html: string; text: string } {
@@ -861,7 +870,7 @@ export async function runPipeline(
 	const log = d.log ?? ((msg: string) => console.log(msg));
 	const nowMs = d.nowMs ?? Date.now;
 	if (!hasNotifyChannel(cfg) && !hasSmtpChannel(cfg)) {
-		throw new Error("缺少发信通道。请设置 NOTIFY_KEY + NOTIFY_TO，或 SMTP_USER + SMTP_PASS + MAIL_TO");
+		throw new Error("缺少发信通道。请设置 NOTIFY_KEY + NOTIFY_TO 或 NOTIFY_KEY + NOTIFY_USE_PRESET=true，或 SMTP_USER + SMTP_PASS + MAIL_TO");
 	}
 
 	const state = await h.loadState();

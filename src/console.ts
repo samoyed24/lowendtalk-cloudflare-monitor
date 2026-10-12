@@ -1,3 +1,4 @@
+import { hasNotifyChannel, hasSmtpChannel } from "./monitor";
 import { renderConsole } from "./console-ui";
 import { buildConfig, ConsoleTestError, loadStateFromKv, runConsoleTest } from "./runtime";
 import type { RuntimeEnv } from "./runtime";
@@ -95,8 +96,8 @@ export async function handleConsole(request: Request, env: RuntimeEnv, ctx: Pick
 			const state = await loadStateFromKv(env);
 			const config = buildConfig(env);
 			const channels = [];
-			if (config.notifyKey && config.notifyTo) channels.push("Portcloud Notify");
-			if (config.smtpUser && config.smtpPass && config.smtpTo) channels.push("SMTP");
+			if (hasNotifyChannel(config)) channels.push("Portcloud Notify");
+			if (hasSmtpChannel(config)) channels.push("SMTP");
 			return json({ email: identity.email, processed: state.sent.length, lastRun: state.lastRun ?? null,
 				intervalMinutes: config.intervalMinutes, aiModel: config.aiModel, channels, logRetentionDays: 30 });
 		}

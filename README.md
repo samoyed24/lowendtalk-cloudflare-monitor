@@ -71,12 +71,12 @@
 | 名称 | 必填 | 说明 |
 |---|---|---|
 | `NOTIFY_KEY` | 通道 1 | Portcloud Notify API Key，形如 `pck_xxx` |
-| `NOTIFY_TO` | 通道 1 | 收件邮箱（须与控制台验证过的地址一致） |
+| `NOTIFY_TO` | 通道 1 普通模式 | `email` 时为已验证收件邮箱；`ntfy` 时为自己已添加通道的完整 canonical topic（与通道列表一致，不是 channel ID）。preset 模式无需填写 |
 | `SMTP_USER` | 通道 2 | 发件邮箱，如 `you@qq.com` |
 | `SMTP_PASS` | 通道 2 | 邮箱授权码（不是登录密码） |
 | `MAIL_TO` | 通道 2 | 收件邮箱 |
 
-> **通道 1（Portcloud Notify，推荐）**：给本项目仓库点个 Star，再到 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录，添加并验证接收邮箱，然后申请一个 API Key 就能用。不点 Star 调用会返回 `403 STAR_REQUIRED`。
+> **通道 1（Portcloud Notify，推荐）**：给本项目仓库点个 Star，再到 [notify.portcloud.online](https://notify.portcloud.online) 用 GitHub 登录，申请 API Key。普通邮件模式添加并验证接收邮箱；ntfy 模式添加自己的 ntfy 通道，将 `NOTIFY_TYPE` 改为 `ntfy`，并把通道列表显示的完整 canonical topic 填入 `NOTIFY_TO`。若使用控制台配置的默认通道链，将 `wrangler.jsonc` 的 `NOTIFY_USE_PRESET` 改为 `true`，只需填写 `NOTIFY_KEY`（仍为必填）；此时完全忽略 `NOTIFY_TO` 和 `NOTIFY_TYPE`，包括无效的值。不点 Star 调用会返回 `403 STAR_REQUIRED`。
 >
 > **通道 2（自建 SMTP）**：要自己准备邮箱、授权码、端口和 TLS 模式，配起来更麻烦，除非你已经有稳定的发信服务，否则优先用通道 1。
 
@@ -127,6 +127,7 @@ workflow 会自动：
 | `INTERVAL_MINUTES` | `60` | 同上，且要同步改 cron（见[第四节](#四推送间隔)） |
 | `SMTP_HOST` / `SMTP_PORT` | `smtp.qq.com` / `465` | 同上 |
 | `NOTIFY_URL` / `NOTIFY_TIMEOUT` | 见下表 | 同上 |
+| `NOTIFY_USE_PRESET` / `NOTIFY_TYPE` | `false` / `email` | 同上；preset 使用服务端默认通道链，普通模式可选 `email` / `ntfy` |
 
 改 `wrangler.jsonc` 里的 `vars` 是**非敏感配置**，可以提交到仓库；提交后回 **Actions → Run workflow** 重新部署即可生效。
 
@@ -142,12 +143,12 @@ workflow 会自动：
 | Secret | 必填 | 说明 |
 |---|---|---|
 | `NOTIFY_KEY` | 通道 1 | Portcloud Notify API Key，形如 `pck_xxx`（兼容旧 `PC_KEY`） |
-| `NOTIFY_TO` | 通道 1 | 收件邮箱（与控制台验证过的地址一致；兼容旧 `PC_TO`） |
+| `NOTIFY_TO` | 通道 1 普通模式 | `email` 时为已验证收件邮箱；`ntfy` 时为自己已添加通道的完整 canonical topic（不是 channel ID）；preset 模式忽略（兼容旧 `PC_TO`） |
 | `SMTP_USER` | 通道 2 | 发件邮箱，如 `you@qq.com` |
 | `SMTP_PASS` | 通道 2 | 邮箱授权码（不是登录密码） |
 | `MAIL_TO` | 通道 2 | 收件邮箱 |
 
-两个通道至少配一个，都配则同时发送。
+两个通道至少配一个，都配则分别尝试发送；某个通道失败不会阻止另一个已启用通道的尝试，任何失败仍会向调用方抛出。SMTP 独立于 Portcloud Notify 的普通/preset 模式。
 
 ### Vars（`wrangler.jsonc`，可选，都有默认值）
 
@@ -160,10 +161,22 @@ workflow 会自动：
 | `CLASSIFY_BATCH_SIZE` | `1` | 单次 AI 分类的条数；完整正文默认每次 1 帖，避免多篇长文挤占上下文。调大会减少调用次数，但更容易超出模型限制 |
 | `REQUIRE_SERVER_TAG` | `true` | 只推送带服务器类型标签的条目 |
 | `INTERVAL_MINUTES` | `60` | 推送间隔（分钟），与 cron 保持一致 |
+| `NOTIFY_USE_PRESET` | `false` | `true` 使用服务端默认通道链，只需 `NOTIFY_KEY`；缺少 key 属于配置错误。完全忽略 `NOTIFY_TO` / `NOTIFY_TYPE`，包括无效值 |
+| `NOTIFY_TYPE` | `email` | 普通模式只支持 `email` / `ntfy`，分别配合已验证邮箱 / 自己已添加通道的完整 canonical ntfy topic；preset 模式忽略 |
 | `NOTIFY_URL` | `https://notify.portcloud.online` | Portcloud Notify API 地址（兼容旧 `PC_URL`） |
 | `NOTIFY_TIMEOUT` | `60` | Portcloud Notify 轮询投递结果的总预算（秒），须为正整数（兼容旧 `PC_TIMEOUT`） |
 | `SMTP_HOST` | `smtp.qq.com` | 自定义 SMTP 服务器 |
 | `SMTP_PORT` | `465` | 465（隐式 TLS）或 587（STARTTLS）；25 被 Cloudflare 禁止 |
+
+### Portcloud Notify 请求与投递结果
+
+本项目采用[开发环境 OpenAPI 契约](https://dev-notify.portcloud.online/api/openapi.json)，但默认 `NOTIFY_URL` 仍为生产地址 `https://notify.portcloud.online`。
+
+- 普通模式请求 `POST /api/v1/send`，JSON 为 `{type,to,title,body}`。
+- preset 模式请求 `POST /api/v1/send-preset`，JSON 仅为 `{title,body}`，不传 preset ID、type 或 to；由服务端按控制台配置的顺序执行默认通道链，遇到首次成功或不确定结果即停止，客户端不自行展开或选择通道。
+- `body` 是纯文本，邮件 HTML 由服务端生成；客户端不再上传 HTML。
+- 接受入队不等于投递成功；保留对 `GET /api/v1/send/{log_id}` 的结果轮询，`NOTIFY_TIMEOUT` 控制总预算。投递失败、未知状态或无法确认结果都会向调用方暴露，不伪装成功。
+- 不自动重试发送 POST，也不在普通/preset 模式之间自动降级或回退；网络超时等情况可能已经入队，避免盲目重发导致重复通知。后续监控周期的处理仍遵循原有 KV 去重与不确定投递语义。
 
 ### 可选 Repository Variable
 
@@ -279,6 +292,8 @@ CLOUDFLARE_ACCOUNT_ID=<你的 Account ID> ./scripts/resolve-kv.sh
 
 # 2) 设置推送密钥
 npx wrangler secret put NOTIFY_KEY
+# 普通 email/ntfy 模式才需要目标；preset 模式只设 NOTIFY_KEY，
+# 并在 wrangler.jsonc 将 NOTIFY_USE_PRESET 改为 "true"。
 npx wrangler secret put NOTIFY_TO
 
 # 3) 部署

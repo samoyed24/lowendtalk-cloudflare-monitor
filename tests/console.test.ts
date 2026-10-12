@@ -78,6 +78,19 @@ describe("console authorization and input boundaries", () => {
 		}
 	});
 
+	it("预设仅配置 Key 仍显示通知通道，不泄露 Key 或被忽略的目标", async () => {
+		const { env } = fixture();
+		Object.assign(env, {
+			NOTIFY_USE_PRESET: "true", NOTIFY_TYPE: "invalid",
+			NOTIFY_KEY: "private-preset-key", NOTIFY_TO: "",
+		});
+		const response = await handleConsole(req("/api/overview"), env, authenticated);
+		expect(response.status).toBe(200);
+		const body = await response.text();
+		expect(JSON.parse(body).channels).toEqual(["Portcloud Notify"]);
+		expect(body).not.toContain("private-preset-key");
+	});
+
 	it("拒绝非法分页和越界 pageSize，不将大批数据回传", async () => {
 		const { env, get } = fixture();
 		for (const query of ["page=0", "page=-1", "page=1.5", "page=1e3", "pageSize=101", "pageSize=0", "page=1000001"]) {

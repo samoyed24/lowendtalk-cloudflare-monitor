@@ -4,7 +4,11 @@ import type { Deps, MonitorConfig, PipelineState, RunHandlers } from "./monitor"
 import { createRedactor, RunLog } from "./run-store";
 import type { RunKind } from "./run-store";
 
-export type RuntimeEnv = Omit<Env, "AI"> & { AI: Pick<Ai, "run"> };
+export type RuntimeEnv = Omit<Env, "AI" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE"> & {
+	AI: Pick<Ai, "run">;
+	NOTIFY_USE_PRESET?: string;
+	NOTIFY_TYPE?: string;
+};
 
 const CLASSIFY_RESPONSE_FORMAT = {
 	type: "json_schema",
@@ -75,6 +79,17 @@ export function buildConfig(env: AppEnv): MonitorConfig {
 	const requireTag = String(env.REQUIRE_SERVER_TAG);
 	const notifyTimeoutRaw = readInt(String(env.NOTIFY_TIMEOUT ?? env.PC_TIMEOUT), 60);
 	const smtpPortRaw = readInt(String(env.SMTP_PORT ?? "465"), 465);
+	const presetRaw = (env.NOTIFY_USE_PRESET || "false").trim().toLowerCase();
+	if (!["true", "false", "1", "0", "yes", "no", "on", "off"].includes(presetRaw)) {
+		throw new Error("NOTIFY_USE_PRESET 必须是布尔值（true/false、1/0、yes/no、on/off）");
+	}
+	const notifyUsePreset = ["true", "1", "yes", "on"].includes(presetRaw);
+	const notifyType = notifyUsePreset ? "email" : env.NOTIFY_TYPE || "email";
+	if (notifyType !== "email" && notifyType !== "ntfy") {
+		throw new Error("NOTIFY_TYPE 必须是 email 或 ntfy");
+	}
+	const notifyKey = envStr(env, "NOTIFY_KEY") || envStr(env, "PC_KEY");
+	if (notifyUsePreset && !notifyKey) throw new Error("发送预设需要配置 NOTIFY_KEY");
 	return {
 		feedUrl: String(env.FEED_URL),
 		lookbackDays: readInt(String(env.LOOKBACK_DAYS), 7),
@@ -84,8 +99,10 @@ export function buildConfig(env: AppEnv): MonitorConfig {
 		intervalMinutes: readInt(String(env.INTERVAL_MINUTES), 60),
 		aiModel: String(env.AI_MODEL),
 		notifyUrl: String(env.NOTIFY_URL ?? env.PC_URL ?? "https://notify.portcloud.online").replace(/\/+$/, ""),
-		notifyKey: envStr(env, "NOTIFY_KEY") || envStr(env, "PC_KEY"),
-		notifyTo: envStr(env, "NOTIFY_TO") || envStr(env, "PC_TO"),
+		notifyKey,
+		notifyUsePreset,
+		notifyType,
+		notifyTo: notifyUsePreset ? "" : envStr(env, "NOTIFY_TO") || envStr(env, "PC_TO"),
 		notifyTimeout: notifyTimeoutRaw > 0 ? notifyTimeoutRaw : 60,
 		smtpHost: String(env.SMTP_HOST ?? "smtp.qq.com"),
 		smtpPort: smtpPortRaw > 0 ? smtpPortRaw : 465,

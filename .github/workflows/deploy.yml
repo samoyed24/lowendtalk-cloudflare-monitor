@@ -47,7 +47,7 @@ jobs:
             exit 1
           fi
           if [ -z "$NOTIFY_KEY" ] && [ -z "$SMTP_USER" ]; then
-            echo "::error::至少配置一个推送通道：NOTIFY_KEY + NOTIFY_TO，或 SMTP_USER + SMTP_PASS + MAIL_TO"
+            echo "::error::至少配置一个推送通道：NOTIFY_KEY + NOTIFY_TO（preset 模式只需 NOTIFY_KEY），或 SMTP_USER + SMTP_PASS + MAIL_TO"
             exit 1
           fi
           echo "参数校验通过"
@@ -66,6 +66,7 @@ jobs:
 
       - name: 部署 Worker
         id: deploy
+        # NOTIFY_USE_PRESET / NOTIFY_TYPE 等非敏感变量直接使用仓库 wrangler.jsonc 的 vars。
         run: |
           # 首次部署时 KV 刚创建，API 可能还没完全就绪；有界重试，输出始终完整打印。
           code=1

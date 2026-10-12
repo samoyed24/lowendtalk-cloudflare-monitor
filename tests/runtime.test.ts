@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ConsoleTestError, handleCron, runConsoleTest, type RuntimeEnv } from "../src/runtime";
+import { buildConfig, ConsoleTestError, handleCron, runConsoleTest, type RuntimeEnv } from "../src/runtime";
 import { createRedactor, getRunPage, listRuns, LOG_RETENTION_DAYS, RUN_PREFIX, RunLog, type RunSummary } from "../src/run-store";
 
 const NOW = Date.parse("2026-10-11T12:00:00Z");
@@ -51,6 +51,21 @@ function env(state: KVNamespace, overrides: Partial<RuntimeEnv> & { SMTP_PASS?: 
 }
 
 const feedFetch: typeof fetch = async () => new Response(rss);
+
+describe("notification configuration", () => {
+	it("预设忽略无效渠道类型和缺省目标，但必须有 Key", () => {
+		const kv = memoryKv();
+		const configured = env(kv.state, { NOTIFY_USE_PRESET: "true", NOTIFY_TYPE: "invalid", NOTIFY_TO: "" });
+		expect(buildConfig(configured).notifyUsePreset).toBe(true);
+		expect(() => buildConfig({ ...configured, NOTIFY_KEY: "" })).toThrow(/NOTIFY_KEY/);
+	});
+
+	it("普通模式拒绝未知类型，预设开关拒绝无效布尔值", () => {
+		const kv = memoryKv();
+		expect(() => buildConfig(env(kv.state, { NOTIFY_TYPE: "invalid" }))).toThrow(/NOTIFY_TYPE/);
+		expect(() => buildConfig(env(kv.state, { NOTIFY_USE_PRESET: "invalid" }))).toThrow(/NOTIFY_USE_PRESET/);
+	});
+});
 
 describe("run store", () => {
 	it("persists once with 30-day TTL, bounded metadata, redacted/truncated logs and offset pages", async () => {
@@ -192,6 +207,23 @@ describe("console tests", () => {
 		expect(kv.put).toHaveBeenCalledTimes(1);
 		expect(kv.put.mock.calls[0]?.[0]).toBe(RUN_PREFIX + result.runId);
 		expect((await getRunPage(kv.state, result.runId, 1, 20))?.items.some((entry) => entry.message.includes("Portcloud"))).toBe(true);
+	});
+
+	it("预设受理拒绝记录失败，不保存去重状态或回退重发", async () => {
+		const kv = memoryKv();
+		const fetchImpl = vi.fn<typeof fetch>(async () =>
+			Response.json({ error: { code: "NO_PRESET", message: "未配置发送预设" } }, { status: 400 }));
+		const saveState = vi.fn();
+		const error = await runConsoleTest(
+			env(kv.state, { NOTIFY_USE_PRESET: "true", NOTIFY_TYPE: "invalid", NOTIFY_TO: "" }),
+			"mail", "reader@example.invalid", { fetchImpl, log: quiet, nowMs: () => NOW, saveState },
+		).catch((exc: unknown) => exc);
+		expect(error).toBeInstanceOf(ConsoleTestError);
+		if (!(error instanceof ConsoleTestError)) throw error;
+		expect(error.message).toContain("NO_PRESET");
+		expect(fetchImpl).toHaveBeenCalledTimes(1);
+		expect(saveState).not.toHaveBeenCalled();
+		expect(await getRunPage(kv.state, error.runId, 1, 20)).toMatchObject({ run: { status: "failed" } });
 	});
 
 	it("surfaces persistence failure after test delivery without resending or claiming mail failure", async () => {

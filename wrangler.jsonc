@@ -31,6 +31,8 @@
 		"CLASSIFY_BATCH_SIZE": "1",
 		"REQUIRE_SERVER_TAG": "true",
 		"INTERVAL_MINUTES": "60",
+		"NOTIFY_USE_PRESET": "false",
+		"NOTIFY_TYPE": "email",
 		"NOTIFY_URL": "https://notify.portcloud.online",
 		"NOTIFY_TIMEOUT": "60",
 		"SMTP_HOST": "smtp.qq.com",
