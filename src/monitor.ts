@@ -5,6 +5,9 @@
 
 import { sendSmtpMail } from "./smtp";
 import type { SmtpDialer } from "./smtp";
+import { Client } from "portcloud-notify";
+import type { ClientOptions } from "portcloud-notify";
+import { APIError, PortcloudNotifyError, RateLimitError, ServerError, TransportError } from "portcloud-notify";
 export interface MonitorConfig {
 	feedUrl: string;
 	lookbackDays: number;
@@ -568,12 +571,59 @@ function errMsg(exc: unknown): string {
 	return exc instanceof Error ? exc.message : String(exc);
 }
 
+/**
+ * 构造官方 SDK 客户端：发送与状态查询的路由、成功状态码校验、错误信封解析都在 SDK 里；
+ * fetch / sleep / now 注入同一套依赖，Worker 与单测走同一条路径。env 固定为空：
+ * Worker 没有 process.env，也不该让宿主环境变量意外改变发送行为。
+ * SDK 会本地校验 NOTIFY_URL / NOTIFY_KEY，这类错误发生在任何请求之前（确定没发出去），
+ * 因此按配置错误上报，而不是结果未知。
+ */
+function notifyClient(cfg: MonitorConfig, d: Deps): Client {
+	const options: ClientOptions = {
+		apiKey: cfg.notifyKey,
+		baseUrl: cfg.notifyUrl,
+		timeoutMs: NOTIFY_REQUEST_TIMEOUT_MS,
+		env: {},
+	};
+	if (d.fetchImpl !== undefined) options.fetch = d.fetchImpl;
+	if (d.sleep !== undefined) options.sleep = d.sleep;
+	if (d.nowMs !== undefined) options.now = d.nowMs;
+	try {
+		return new Client(options);
+	} catch (exc) {
+		throw new Error(`Portcloud Notify 配置错误：${errMsg(exc)}`, { cause: exc });
+	}
+}
+
+/**
+ * 受理阶段的错误分类：可能已入队（AcceptanceUnknownError，即 outcomeUnknown）的判结果未知；
+ * 服务明确拒绝、本地配置或参数错误按普通失败上报，保留 HTTP 状态与错误码。
+ */
+function notifyAcceptFailure(exc: unknown): Error {
+	if (exc instanceof TransportError && exc.outcomeUnknown) {
+		return new NotifyUnconfirmed(`Portcloud Notify 受理请求失败（投递结果未知）：${exc.message}`, { cause: exc });
+	}
+	if (exc instanceof APIError) {
+		return new Error(`Portcloud Notify 受理失败: HTTP ${exc.httpStatus} — ${exc.code}: ${exc.serviceMessage}`, {
+			cause: exc,
+		});
+	}
+	if (exc instanceof PortcloudNotifyError) {
+		return new Error(`Portcloud Notify 受理失败: ${exc.message}`, { cause: exc });
+	}
+	return exc instanceof Error ? exc : new Error(String(exc));
+}
+
+/**
+ * 一次状态查询：429 / 5xx / 连接层失败在预算内按原节奏重试（重试的是查询，不会重发通知），
+ * 其余异常直接判结果未知。
+ */
 async function notifyPollOnce(
+	client: Client,
 	logId: number,
-	cfg: MonitorConfig,
 	deadlineMs: number,
 	d: Deps,
-): Promise<{ status: string; reason: string | null }> {
+): Promise<{ status: string; reason: string | null; smtpResponse: string | null }> {
 	const sleep =
 		d.sleep ??
 		((ms: number) => {
@@ -582,7 +632,6 @@ async function notifyPollOnce(
 			return promise;
 		});
 	const nowMs = d.nowMs ?? Date.now;
-	const fetchImpl = d.fetchImpl ?? fetch;
 	let last = "";
 	for (;;) {
 		const remaining = deadlineMs - nowMs();
@@ -592,53 +641,36 @@ async function notifyPollOnce(
 			);
 		}
 		try {
-			const r = await fetchImpl(`${cfg.notifyUrl}/api/v1/send/${logId}`, {
-				headers: { Authorization: `Bearer ${cfg.notifyKey}`, "User-Agent": UA },
-				signal: AbortSignal.timeout(Math.min(NOTIFY_REQUEST_TIMEOUT_MS, remaining)),
-			});
-			if (r.status === 200) {
-				const data: unknown = await r.json().catch((exc: unknown) => {
-					throw new NotifyUnconfirmed(
-						`Portcloud Notify 状态响应非 JSON（HTTP 200，log_id=${logId}，投递结果未知）`,
-						{ cause: exc },
-					);
-				});
-				if (typeof data !== "object" || data === null || !("log_id" in data) || !("status" in data)) {
-					throw new NotifyUnconfirmed(
-						`Portcloud Notify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
-					);
-				}
-				const gotId: unknown = data.log_id;
-				const status: unknown = data.status;
-				if (
-					typeof gotId !== "number" ||
-					!Number.isInteger(gotId) ||
-					gotId !== logId ||
-					typeof status !== "string" ||
-					NOTIFY_KNOWN_STATUS[status] !== true
-				) {
-					throw new NotifyUnconfirmed(
-						`Portcloud Notify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(data)?.slice(0, 200)}，投递结果未知）`,
-					);
-				}
-				const reason: unknown = "failure_reason" in data ? data.failure_reason : null;
-				return { status, reason: reason == null ? null : String(reason) };
-			}
-			if (r.status !== 429 && r.status < 500) {
+			const s = await client.getStatus(logId);
+			if (s.logId !== logId || NOTIFY_KNOWN_STATUS[s.status] !== true) {
 				throw new NotifyUnconfirmed(
-					`Portcloud Notify 状态查询被拒: HTTP ${r.status}（log_id=${logId}，投递结果未知）`,
+					`Portcloud Notify 状态响应异常（log_id=${logId}，返回 ${JSON.stringify(s).slice(0, 200)}，投递结果未知）`,
 				);
 			}
-			last = `HTTP ${r.status}`;
+			return { status: s.status, reason: s.failureReason ?? null, smtpResponse: s.smtpResponse ?? null };
 		} catch (exc) {
 			if (exc instanceof NotifyUnconfirmed) throw exc;
-			const name = errName(exc);
-			if (name === "TimeoutError" || name === "AbortError" || name === "TypeError") {
-				// 连接错误 / 超时：预算内继续轮询
-				last = `${name}: ${errMsg(exc).slice(0, 120)}`;
+			if (exc instanceof RateLimitError || exc instanceof ServerError) {
+				// 429 / 5xx：服务临时故障，预算内继续轮询。
+				last = `HTTP ${exc.httpStatus}`;
+			} else if (exc instanceof TransportError) {
+				if (exc.outcomeUnknown || exc.httpStatus !== undefined) {
+					// 收到了响应却读不出结果（响应体非法、重定向、非 200 的成功码）：结果不可信，不再重试。
+					throw new NotifyUnconfirmed(
+						`Portcloud Notify 状态响应不可用（log_id=${logId}，投递结果未知）：${exc.message.slice(0, 120)}`,
+						{ cause: exc },
+					);
+				}
+				// 连接层失败（网络错误 / 超时）：预算内继续轮询。
+				last = `连接失败: ${exc.message.slice(0, 120)}`;
+			} else if (exc instanceof APIError) {
+				throw new NotifyUnconfirmed(
+					`Portcloud Notify 状态查询被拒: HTTP ${exc.httpStatus}（log_id=${logId}，投递结果未知）：${exc.code}`,
+					{ cause: exc },
+				);
 			} else {
 				throw new NotifyUnconfirmed(
-					`Portcloud Notify 状态查询异常（log_id=${logId}，投递结果未知）：${name}: ${errMsg(exc).slice(0, 120)}`,
+					`Portcloud Notify 状态查询异常（log_id=${logId}，投递结果未知）：${errName(exc)}: ${errMsg(exc).slice(0, 120)}`,
 					{ cause: exc },
 				);
 			}
@@ -668,53 +700,19 @@ export async function sendViaPortcloudNotify(
 			setTimeout(resolve, ms);
 			return promise;
 		});
-	const fetchImpl = d.fetchImpl ?? fetch;
 	if (!hasNotifyChannel(cfg)) {
 		throw new Error("未配置 Portcloud Notify 通道。请设置 NOTIFY_KEY，并设置 NOTIFY_TO 或启用 NOTIFY_USE_PRESET");
 	}
-	const payload = cfg.notifyUsePreset
-		? { title: subject, body: textBody }
-		: { type: cfg.notifyType, to: cfg.notifyTo, title: subject, body: textBody };
-	const route = cfg.notifyUsePreset ? "send-preset" : "send";
+	const client = notifyClient(cfg, d);
 	const target = cfg.notifyUsePreset ? "账号预设通知链" : `${cfg.notifyType}: ${cfg.notifyTo}`;
-	let r: Response;
+	let logId: number;
 	try {
-		r = await fetchImpl(`${cfg.notifyUrl}/api/v1/${route}`, {
-			method: "POST",
-			headers: {
-				Authorization: `Bearer ${cfg.notifyKey}`,
-				"Content-Type": "application/json",
-				"User-Agent": UA,
-			},
-			body: JSON.stringify(payload),
-			signal: AbortSignal.timeout(NOTIFY_REQUEST_TIMEOUT_MS),
-		});
+		// 受理只发一次：API 没有幂等键，重发就是重复通知，SDK 也不会重试 POST。
+		logId = cfg.notifyUsePreset
+			? (await client.sendPreset(subject, textBody)).logId
+			: (await client.send(cfg.notifyType, subject, { to: cfg.notifyTo, body: textBody })).logId;
 	} catch (exc) {
-		throw new NotifyUnconfirmed(
-			`Portcloud Notify 受理请求失败（投递结果未知）：${errName(exc)}: ${errMsg(exc).slice(0, 120)}`,
-			{ cause: exc },
-		);
-	}
-	if (r.status !== 201) {
-		const body = await r.text().catch(() => "");
-		throw new Error(`Portcloud Notify 受理失败: HTTP ${r.status} — ${body.slice(0, 200)}`);
-	}
-	const data: unknown = await r.json().catch(async () => {
-		const body = await r.text().catch(() => "");
-		throw new NotifyUnconfirmed(
-			`Portcloud Notify 受理响应非 JSON（HTTP 201，投递结果未知）: ${body.slice(0, 200)}`,
-		);
-	});
-	if (typeof data !== "object" || data === null || !("log_id" in data)) {
-		throw new NotifyUnconfirmed(
-			`Portcloud Notify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
-		);
-	}
-	const logId: unknown = data.log_id;
-	if (typeof logId !== "number" || !Number.isInteger(logId) || logId <= 0) {
-		throw new NotifyUnconfirmed(
-			`Portcloud Notify 受理响应缺少合法 log_id（HTTP 201，投递结果未知）: ${JSON.stringify(data)?.slice(0, 200)}`,
-		);
+		throw notifyAcceptFailure(exc);
 	}
 	// ---- 轮询：预算自受理成功起计，首次 1 秒后，之后每 1 秒一次 ----
 	const deadlineMs = nowMs() + cfg.notifyTimeout * 1000;
@@ -727,13 +725,15 @@ export async function sendViaPortcloudNotify(
 			);
 		}
 		await sleep(Math.min(NOTIFY_POLL_INTERVAL_MS, remaining));
-		const { status, reason } = await notifyPollOnce(logId, cfg, deadlineMs, d);
+		const { status, reason, smtpResponse } = await notifyPollOnce(client, logId, deadlineMs, d);
 		if (status === "success") {
 			log(`通知已发送（Portcloud Notify）→ ${target}（log_id=${logId}）`);
 			return;
 		}
 		if (status === "failed" || status === "rejected") {
-			throw new Error(`Portcloud Notify 投递${status}（log_id=${logId}）：${reason || "服务端未提供原因"}`);
+			// failure_reason 是稳定的原因码，smtp_response 是服务端原始回执：都上报，不吞掉。
+			const detail = [reason, smtpResponse].filter((v): v is string => v !== null && v !== "").join(" / ");
+			throw new Error(`Portcloud Notify 投递${status}（log_id=${logId}）：${detail || "服务端未提供原因"}`);
 		}
 		// queued / sending：继续等下一次轮询。
 	}

@@ -198,7 +198,7 @@ describe("console tests", () => {
 		const kv = memoryKv();
 		const fetchImpl: typeof fetch = vi.fn(async (url: RequestInfo | URL) => String(url).endsWith("/api/v1/send")
 			? Response.json({ log_id: 7 }, { status: 201 })
-			: Response.json({ log_id: 7, status: "success", failure_reason: null }));
+			: Response.json({ log_id: 7, status: "success", failure_reason: null, created_at: "2026-10-02T00:00:00+08:00" }));
 		const saveState = vi.fn();
 		const result = await runConsoleTest(env(kv.state), "mail", "reader@example.invalid", { fetchImpl, sleep: async () => {}, nowMs: () => NOW, log: quiet, saveState });
 		expect(fetchImpl).toHaveBeenCalledTimes(2);

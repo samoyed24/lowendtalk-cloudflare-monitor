@@ -178,7 +178,7 @@ describe("success", () => {
 	});
 
 	it("preset 不发送已配置的显式目标", async () => {
-		const h = harness({});
+		const h = harness({ post: jsonResponse(201, { log_id: 7, preset_id: 2 }) });
 		const c = cfg();
 		c.notifyUsePreset = true;
 		await send(h, c);
@@ -208,6 +208,19 @@ describe("terminal failures", () => {
 		const err = await send(h).catch((e: unknown) => e);
 		expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
 		expect(String((err as Error).message)).toContain("rejected");
+	});
+
+	it("failed 同时上报 failure_reason 与 smtp_response", async () => {
+		const h = harness({
+			post: jsonResponse(201, { log_id: 44 }),
+			gets: [
+				jsonResponse(200, { ...statusPayload(44, "failed", "smtp_timeout"), smtp_response: "451 4.4.1 timeout" }),
+			],
+		});
+		const err = await send(h).catch((e: unknown) => e);
+		expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
+		expect(String((err as Error).message)).toContain("smtp_timeout");
+		expect(String((err as Error).message)).toContain("451 4.4.1 timeout");
 	});
 });
 
@@ -285,11 +298,13 @@ describe("malformed responses", () => {
 });
 
 describe("no post retry", () => {
-	it("受理 HTTP 错误不重试（非 Unconfirmed）", async () => {
-		for (const status of [403, 500]) {
+	it("受理 HTTP 错误不重试；4xx 明确失败，5xx 判结果未知", async () => {
+		// 4xx：服务在入队前就拒绝，属明确失败；5xx：可能已入队，SDK 判为结果未知。
+		for (const [status, unconfirmed] of [[403, false], [500, true]] as const) {
 			const h = harness({ post: new Response("err", { status }) });
 			const err = await send(h).catch((e: unknown) => e);
-			expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
+			expect(err instanceof NotifyUnconfirmed).toBe(unconfirmed);
+			expect(String((err as Error).message)).toContain(`HTTP ${status}`);
 			expect(h.postCalls()).toHaveLength(1);
 			expect(h.getCalls()).toHaveLength(0);
 		}
@@ -340,5 +355,16 @@ describe("preset errors and configuration", () => {
 			expect(h.postCalls()).toHaveLength(0);
 			expect(h.getCalls()).toHaveLength(0);
 		}
+	});
+
+	it("NOTIFY_URL 非法按配置错误上报，不发请求也不判结果未知", async () => {
+		const h = harness({});
+		const c = cfg();
+		c.notifyUrl = "https://notify.portcloud.online/api";
+		const err = await send(h, c).catch((e: unknown) => e);
+		expect(err).not.toBeInstanceOf(NotifyUnconfirmed);
+		expect(String((err as Error).message)).toContain("配置错误");
+		expect(h.postCalls()).toHaveLength(0);
+		expect(h.getCalls()).toHaveLength(0);
 	});
 });

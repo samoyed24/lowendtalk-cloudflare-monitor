@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { AcceptanceUnknownError } from "portcloud-notify";
 import {
 	dueSinceLastRun,
 	merge,
@@ -325,7 +326,12 @@ describe("sendMail 双通道", () => {
 				return acceptance ?? new Response(JSON.stringify({ log_id: 1 }), { status: 201 });
 			}
 			return new Response(
-				JSON.stringify({ log_id: 1, status, failure_reason: status === "failed" ? "delivery refused" : null }),
+				JSON.stringify({
+					log_id: 1,
+					status,
+					failure_reason: status === "failed" ? "delivery refused" : null,
+					created_at: "2026-10-02T00:00:00+08:00",
+				}),
 				{ status: 200 },
 			);
 		};
@@ -404,8 +410,9 @@ describe("sendMail 双通道", () => {
 	it("preset 只配置 key 仍可发送，且不依赖 SMTP", async () => {
 		
 		const order: string[] = [];
+		const presetAcceptance = new Response(JSON.stringify({ log_id: 1, preset_id: 1 }), { status: 201 });
 		await sendMail("s", "h", "t", cfg({ notifyUsePreset: true, notifyTo: "" }), {
-			fetchImpl: notifyFetch(order),
+			fetchImpl: notifyFetch(order, presetAcceptance),
 			sleep: async () => {},
 			nowMs: tickClock(),
 			log: () => {},
@@ -450,7 +457,9 @@ describe("sendMail 双通道", () => {
 			log: () => {},
 		}).catch((error: unknown) => error);
 		expect(err).toBeInstanceOf(NotifyUnconfirmed);
-		expect((err as Error).cause).toBe(networkError);
+		// 原始 fetch 异常不再直接作为 cause：SDK 把它包成 AcceptanceUnknownError，原因仍在消息里。
+		expect((err as Error).cause).toBeInstanceOf(AcceptanceUnknownError);
+		expect(String((err as Error).message)).toContain("connection lost");
 		expect(order).toEqual(["notify", "smtp"]);
 	});
 
@@ -464,7 +473,9 @@ describe("sendMail 双通道", () => {
 			log: () => {},
 		}).catch((error: unknown) => error);
 		expect(err).toBeInstanceOf(NotifyUnconfirmed);
-		expect((err as Error).cause).toBe(networkError);
+		// 原始 fetch 异常不再直接作为 cause：SDK 把它包成 AcceptanceUnknownError，原因仍在消息里。
+		expect((err as Error).cause).toBeInstanceOf(AcceptanceUnknownError);
+		expect(String((err as Error).message)).toContain("connection lost");
 		expect(order).toEqual(["notify", "smtp"]);
 	});
 

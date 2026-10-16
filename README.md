@@ -172,6 +172,8 @@ workflow 会自动：
 
 本项目采用[开发环境 OpenAPI 契约](https://dev-notify.portcloud.online/api/openapi.json)，但默认 `NOTIFY_URL` 仍为生产地址 `https://notify.portcloud.online`。
 
+HTTP 细节交给官方 SDK `portcloud-notify`（`src/monitor.ts` 的 `notifyClient`）：请求路由、成功状态码校验、错误信封解析都在 SDK 内；本项目只负责轮询预算、轮询节奏和投递结果分类。
+
 - 普通模式请求 `POST /api/v1/send`，JSON 为 `{type,to,title,body}`。
 - preset 模式请求 `POST /api/v1/send-preset`，JSON 仅为 `{title,body}`，不传 preset ID、type 或 to；由服务端按控制台配置的顺序执行默认通道链，遇到首次成功或不确定结果即停止，客户端不自行展开或选择通道。
 - `body` 是纯文本，邮件 HTML 由服务端生成；客户端不再上传 HTML。
