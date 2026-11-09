@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { AcceptanceUnknownError } from "portcloud-notify";
 import {
+	buildDigest,
+	buildText,
 	dueSinceLastRun,
 	merge,
 	normalizePrices,
@@ -17,7 +19,7 @@ import {
 
 function cfg(over: Partial<MonitorConfig> = {}): MonitorConfig {
 	return {
-		feedUrl: "https://example.invalid/feed",
+		feeds: [{ name: "Test", label: "T", url: "https://example.invalid/feed" }],
 		lookbackDays: 7,
 		maxPosts: 60,
 		classifyBatchSize: 10,
@@ -126,6 +128,40 @@ describe("parsePosts", () => {
 		);
 		expect(got[0]?.body.startsWith("Foo")).toBe(false);
 		expect(got[0]?.body).toContain("R&D");
+	});
+});
+
+describe("parsePosts 多来源", () => {
+	it("按来源分别截断，并保留来源标签", () => {
+		const now = Date.parse("2026-10-10T13:00:00Z");
+		const feed: FeedData = {
+			items: [
+				{ url: "l1", title: "l1", content_text: "x", date_published: "2026-10-10T12:00:00Z", source: "LET", sourceName: "LowEndTalk" },
+				{ url: "l2", title: "l2", content_text: "x", date_published: "2026-10-10T11:00:00Z", source: "LET", sourceName: "LowEndTalk" },
+				{ url: "b1", title: "b1", content_text: "x", date_published: "2026-10-10T10:00:00Z", source: "LEB", sourceName: "LowEndBox" },
+			],
+		};
+		const posts = parsePosts(feed, cfg({ maxPosts: 1 }), now);
+		expect(posts.map((p) => p.postUrl)).toEqual(["l1", "b1"]);
+		expect(posts[1]?.source).toBe("LEB");
+		expect(posts[1]?.sourceName).toBe("LowEndBox");
+	});
+});
+
+describe("buildDigest 多来源", () => {
+	const items = [
+		{ title: "a", postUrl: "https://a", author: "", date: "", body: "", source: "LET", sourceName: "LowEndTalk", tags: ["vps"], prices: [], zh: "a" },
+		{ title: "b", postUrl: "https://b", author: "", date: "", body: "", source: "LEB", sourceName: "LowEndBox", tags: ["vps"], prices: [], zh: "b" },
+	];
+
+	it("主题、徽章和页脚带来源，备注保留抓取失败信息", () => {
+		const digest = buildDigest(items, Date.UTC(2026, 9, 10, 12, 0), ["LEB 抓取失败"]);
+		expect(digest.subject).toContain("[LET+LEB]");
+		expect(digest.html).toContain(">LET</span>");
+		expect(digest.html).toContain(">LEB</span>");
+		expect(digest.html).toContain("LEB 抓取失败");
+		expect(digest.html).toContain("来源 LowEndTalk · LowEndBox");
+		expect(buildText(items, ["LEB 抓取失败"])).toContain("[LEB] [vps] b");
 	});
 });
 

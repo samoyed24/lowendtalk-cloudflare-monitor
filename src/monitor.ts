@@ -1,6 +1,6 @@
-// LowEndTalk 低价监控 —— 纯流水线逻辑（无 Worker API，可单元测试）。
+// 低价 VPS 监控 —— 纯流水线逻辑（无 Worker API，可单元测试）。
 //
-// 抓取 → 解析 → AI 打标 → 整理 → 去重 → 发信 → 存状态。
+// 按来源抓取 → 解析 → AI 打标 → 整理 → 去重 → 发信 → 存状态。
 // Worker 绑定（KV / Workers AI）的接线在 runtime.ts。
 
 import { sendSmtpMail } from "./smtp";
@@ -8,8 +8,16 @@ import type { SmtpDialer } from "./smtp";
 import { Client } from "portcloud-notify";
 import type { ClientOptions } from "portcloud-notify";
 import { APIError, PortcloudNotifyError, RateLimitError, ServerError, TransportError } from "portcloud-notify";
+
+/** 一个 RSS 来源。标签用于邮件徽章和主题前缀，名称用于页脚。 */
+export interface FeedSource {
+	name: string;
+	label: string;
+	url: string;
+}
+
 export interface MonitorConfig {
-	feedUrl: string;
+	feeds: FeedSource[];
 	lookbackDays: number;
 	maxPosts: number;
 	classifyBatchSize: number;
@@ -37,6 +45,10 @@ export interface FeedPost {
 	author: string;
 	date: string;
 	body: string;
+	/** 来源短标签，如 LET / LEB。 */
+	source?: string;
+	/** 来源显示名，如 LowEndTalk / LowEndBox。 */
+	sourceName?: string;
 }
 
 export interface Price {
@@ -67,8 +79,18 @@ export interface Deps {
 	smtpDialer?: SmtpDialer;
 }
 
+export interface FeedCount {
+	label: string;
+	name: string;
+	total: number;
+}
+
 export interface FeedData {
 	items: unknown[];
+	/** 部分来源抓取失败时的说明；全部失败会直接抛错。 */
+	warnings?: string[];
+	/** 每个成功来源的原始条数，供管理端 RSS 测试展示。 */
+	counts?: FeedCount[];
 }
 
 const UA = "lowendtalk-cloudflare-monitor/1.0 (+https://github.com/samoyed24)";
@@ -179,16 +201,41 @@ async function fetchWithRetry(
 	throw new Error(`GET ${url} 重试 ${tries} 次仍失败: ${String(last)}`);
 }
 
-export async function fetchFeed(cfg: MonitorConfig, d: Deps = {}): Promise<FeedData> {
+export async function fetchFeeds(cfg: MonitorConfig, d: Deps = {}): Promise<FeedData> {
 	const log = d.log ?? ((msg: string) => console.log(msg));
-	const r = await fetchWithRetry(cfg.feedUrl, { headers: { Accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8" } }, 90_000, 3, d);
-	const xml = await r.text();
-	const items = parseRssItems(xml);
-	if (items.length === 0) {
-		throw new Error(`RSS 里没有解析出任何 <item>（响应前 200 字：${xml.slice(0, 200)}）`);
+	if (cfg.feeds.length === 0) throw new Error("未配置任何 RSS 来源");
+	const items: unknown[] = [];
+	const warnings: string[] = [];
+	const counts: FeedCount[] = [];
+	let succeeded = 0;
+	for (const source of cfg.feeds) {
+		log(`抓取来源 ${source.label}（${source.name}）…`);
+		try {
+			const r = await fetchWithRetry(
+				source.url,
+				{ headers: { Accept: "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8" } },
+				90_000,
+				3,
+				d,
+			);
+			const xml = await r.text();
+			const parsed = parseRssItems(xml);
+			if (parsed.length === 0) {
+				throw new Error(`RSS 里没有解析出任何 <item>（响应前 200 字：${xml.slice(0, 200)}）`);
+			}
+			for (const item of parsed) items.push({ ...item, source: source.label, sourceName: source.name });
+			counts.push({ label: source.label, name: source.name, total: parsed.length });
+			succeeded++;
+			log(`来源 ${source.label}（${source.name}）抓到 ${parsed.length} 条`);
+		} catch (exc) {
+			const detail = exc instanceof Error ? `${exc.constructor.name}: ${exc.message}` : String(exc);
+			const msg = `来源 ${source.label}（${source.name}）抓取失败，已跳过：${detail.slice(0, 300)}`;
+			warnings.push(msg);
+			log(msg);
+		}
 	}
-	log(`抓到 ${items.length} 条`);
-	return { items };
+	if (succeeded === 0) throw new Error(`所有 RSS 来源都抓取失败：\n${warnings.join("\n")}`);
+	return { items, warnings, counts };
 }
 
 // ---------------------------------------------------------------- RSS 解析
@@ -227,6 +274,9 @@ export interface RssItem {
 	date_published: string;
 	content_html: string;
 	author?: { name: string };
+	/** fetchFeeds 注入的来源信息。 */
+	source?: string;
+	sourceName?: string;
 }
 
 /** 把 RSS 转成现有的 JSON Feed 形状，parsePosts 不用改。 */
@@ -308,7 +358,8 @@ function readStringField(item: unknown, key: string): string {
 
 export function parsePosts(feed: FeedData, cfg: MonitorConfig, nowMs = Date.now()): FeedPost[] {
 	const cutoff = nowMs - cfg.lookbackDays * 24 * 3600 * 1000;
-	const posts: FeedPost[] = [];
+	// 每个来源单独截断，避免 LET 的高频帖子把 LEB 挤掉。
+	const groups = new Map<string, FeedPost[]>();
 	for (const item of feed.items) {
 		const url = readStringField(item, "url") || readStringField(item, "external_url") || readStringField(item, "id");
 		if (!url) continue;
@@ -326,10 +377,20 @@ export function parsePosts(feed: FeedData, cfg: MonitorConfig, nowMs = Date.now(
 			const a: unknown = item.author;
 			if (typeof a === "object" && a !== null && "name" in a) author = String(a.name ?? "");
 		}
-		posts.push({ title, postUrl: url, author, date: rawDate, body });
+		const source = readStringField(item, "source") || "RSS";
+		const sourceName = readStringField(item, "sourceName") || source;
+		const post: FeedPost = { title, postUrl: url, author, date: rawDate, body, source, sourceName };
+		const list = groups.get(source);
+		if (list === undefined) groups.set(source, [post]);
+		else list.push(post);
+	}
+	const posts: FeedPost[] = [];
+	for (const list of groups.values()) {
+		list.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+		posts.push(...list.slice(0, Math.max(0, cfg.maxPosts)));
 	}
 	posts.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
-	return posts.slice(0, cfg.maxPosts);
+	return posts;
 }
 
 // ---------------------------------------------------------------- AI
@@ -479,11 +540,17 @@ function escHtml(s: unknown): string {
 		.replace(/"/g, "&quot;");
 }
 
-export function buildDigest(items: Item[], nowMs = Date.now()): { subject: string; html: string } {
+export function buildDigest(items: Item[], nowMs = Date.now(), notes: string[] = []): { subject: string; html: string } {
 	const rows = items.map((x) => {
+		const sourceLabel = x.source ?? "RSS";
+		const sourceName = x.sourceName ?? sourceLabel;
 		const typeTag = x.tags.find((t) => TYPE_TAG_SET[t] === true);
 		const others = x.tags.filter((t) => TYPE_TAG_SET[t] !== true);
-		const badges: string[] = [];
+		const badges: string[] = [
+			`<span title="${escHtml(sourceName)}" style="display:inline-block;font-size:11px;font-weight:700;color:#fff;` +
+				`background:#475569;border-radius:3px;padding:1px 6px;margin-right:6px;vertical-align:1px">` +
+				`${escHtml(sourceLabel)}</span>`,
+		];
 		if (typeTag !== undefined) {
 			badges.push(
 				`<span style="display:inline-block;font-size:11px;font-weight:700;color:#fff;` +
@@ -524,30 +591,44 @@ export function buildDigest(items: Item[], nowMs = Date.now()): { subject: strin
 		.map((k) => `${k} ${counts[k] ?? 0}`)
 		.join(" · ");
 	const now = fmtCst(nowMs);
+	const labels = [...new Set(items.map((x) => x.source ?? "RSS"))];
+	const sourceNames = [...new Set(items.map((x) => x.sourceName ?? x.source ?? "RSS"))];
+	const heading = labels.length > 0 ? `低价 VPS 汇总（${labels.join(" + ")}）` : "低价 VPS 汇总";
+	const sourceLine = sourceNames.length > 0 ? `来源 ${sourceNames.join(" · ")}` : "来源 RSS";
+	const noteHtml = notes.length > 0
+		? `  <div style="margin-top:12px;font-size:11px;color:#b45309;line-height:1.6">\n` +
+			notes.map((n) => `    ${escHtml(n)}<br>\n`).join("") +
+			`  </div>\n`
+		: "";
 	const doc =
 		`<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,sans-serif;max-width:720px">\n` +
-		`  <h2 style="margin:0 0 5px;font-size:19px">LowEndTalk 低价 VPS 汇总</h2>\n` +
+		`  <h2 style="margin:0 0 5px;font-size:19px">${escHtml(heading)}</h2>\n` +
 		`  <div style="color:#8a8a8a;font-size:12px;margin-bottom:16px">\n` +
 		`    新增 <b>${items.length}</b> 条${summary ? `（${summary}）` : ""} · 抓取时间 ${now}\n` +
 		`  </div>\n` +
 		`${rows.join("\n")}\n` +
+		noteHtml +
 		`  <div style="margin-top:18px;font-size:11px;color:#b0b0b0">\n` +
-		`    来源 LowEndTalk › Offers 板块\n` +
+		`    ${escHtml(sourceLine)}\n` +
 		`  </div>\n` +
 		`</div>`;
-	return { subject: `[LET] 低价VPS ${items.length} 条 · ${now.slice(0, 10)}`, html: doc };
+	const prefix = labels.length > 0 ? `[${labels.join("+")}] ` : "";
+	return { subject: `${prefix}低价VPS ${items.length} 条 · ${now.slice(0, 10)}`, html: doc };
 }
 
-export function buildText(items: Item[]): string {
-	const lines = [`LowEndTalk 低价 VPS 汇总 — 新增 ${items.length} 条`, ""];
+export function buildText(items: Item[], notes: string[] = []): string {
+	const labels = [...new Set(items.map((x) => x.source ?? "RSS"))];
+	const title = labels.length > 0 ? `${labels.join(" + ")} 低价 VPS 汇总` : "低价 VPS 汇总";
+	const lines = [`${title} — 新增 ${items.length} 条`, ""];
 	for (const x of items) {
-		const head = x.tags.map((t) => `[${t}]`).join(" ");
+		const head = [x.source ?? "RSS", ...x.tags].map((t) => `[${t}]`).join(" ");
 		const prices = x.prices.map(priceText).join(" / ") || "未列价格";
 		lines.push(`${head} ${x.title}`.trim());
 		lines.push(`  ${prices}  |  ${x.zh}`);
 		lines.push(`  ${x.postUrl}`);
 		lines.push("");
 	}
+	if (notes.length > 0) lines.push(...notes);
 	return lines.join("\n").trim();
 }
 
@@ -810,14 +891,14 @@ export async function sendMail(
 
 export function buildAlert(error: string, nowMs = Date.now()): { subject: string; html: string; text: string } {
 	const when = fmtCst(nowMs);
-	const text = `LowEndTalk 监控本次运行失败\n\n${error.slice(0, 2000)}\n\n时间：${when} (CST)`;
+	const text = `低价监控本次运行失败\n\n${error.slice(0, 2000)}\n\n时间：${when} (CST)`;
 	const html =
 		`<div style="font-family:monospace;font-size:13px">\n` +
-		`  <p><b>LowEndTalk 监控本次运行失败</b></p>\n` +
+		`  <p><b>低价监控本次运行失败</b></p>\n` +
 		`  <p style="color:#b91c1c;white-space:pre-wrap">${escHtml(error.slice(0, 2000))}</p>\n` +
 		`  <p style="color:#6b7280">时间：${when} (CST)</p>\n` +
 		`</div>`;
-	return { subject: "🚨 LET 监控运行失败", html, text };
+	return { subject: "🚨 低价监控运行失败", html, text };
 }
 
 // ---------------------------------------------------------------- 状态与主流程
@@ -859,6 +940,8 @@ export interface RunResult {
 	subject?: string | undefined;
 	items?: number | undefined;
 	html?: string | undefined;
+	/** 部分来源抓取失败时的说明；成功来源仍会正常处理。 */
+	warnings?: string[];
 }
 
 export async function runPipeline(
@@ -881,31 +964,37 @@ export async function runPipeline(
 	}
 	const seen = new Set(state.sent);
 
-	const feed = await fetchFeed(cfg, d);
+	const feed = await fetchFeeds(cfg, d);
+	const warnings = feed.warnings ?? [];
 	const posts = parsePosts(feed, cfg, nowMs());
-	let fresh = posts.filter((p) => !seen.has(p.postUrl));
+	const freshUrls = new Set<string>();
+	let fresh = posts.filter((p) => {
+		if (seen.has(p.postUrl) || freshUrls.has(p.postUrl)) return false;
+		freshUrls.add(p.postUrl);
+		return true;
+	});
 	const limit = opts.limit;
 	if (limit !== undefined && Number.isFinite(limit) && limit > 0) {
 		fresh = fresh.slice(0, Math.floor(limit));
 	}
 	log(`${posts.length} 条在窗口内，其中 ${fresh.length} 条是新增`);
-	if (fresh.length === 0) return { emailed: false };
+	if (fresh.length === 0) return { emailed: false, warnings };
 
 	const items = merge(await classify(fresh, cfg, h.aiChat, d), fresh, cfg.requireServerTag);
 
 	if (opts.dryRun === true) {
-		const digest = items.length > 0 ? buildDigest(items, nowMs()) : { subject: "(无内容)", html: "<p>无内容</p>" };
+		const digest = items.length > 0 ? buildDigest(items, nowMs(), warnings) : { subject: "(无内容)", html: "<p>无内容</p>" };
 		log(`[dry-run] 主题: ${digest.subject}；不改状态、不发信`);
-		return { emailed: false, subject: digest.subject, items: items.length, html: digest.html };
+		return { emailed: false, subject: digest.subject, items: items.length, html: digest.html, warnings };
 	}
 
 	let subject = "";
 	let html: string | undefined;
 	if (items.length > 0) {
-		const digest = buildDigest(items, nowMs());
+		const digest = buildDigest(items, nowMs(), warnings);
 		subject = digest.subject;
 		html = digest.html;
-		await h.send(subject, digest.html, buildText(items));
+		await h.send(subject, digest.html, buildText(items, warnings));
 	}
 
 	// 投递成功后才记状态 —— 失败时这些帖子下次还会被处理，不会丢
@@ -917,5 +1006,5 @@ export async function runPipeline(
 	};
 	await h.saveState(next);
 	log(`状态已保存（累计 ${next.sent.length} 条已推送）`);
-	return { emailed: items.length > 0, subject: subject || undefined, items: items.length, html };
+	return { emailed: items.length > 0, subject: subject || undefined, items: items.length, html, warnings };
 }

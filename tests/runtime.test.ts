@@ -29,7 +29,14 @@ function memoryKv() {
 	return { state, entries, get, put, list };
 }
 
-function env(state: KVNamespace, overrides: Partial<RuntimeEnv> & { SMTP_PASS?: string; PC_KEY?: string } = {}): RuntimeEnv {
+type EnvOverrides = Partial<Omit<RuntimeEnv, "FEED_URL" | "CLASSIFY_BATCH_SIZE">> & {
+	FEED_URL?: string;
+	CLASSIFY_BATCH_SIZE?: string;
+	SMTP_PASS?: string;
+	PC_KEY?: string;
+};
+
+function env(state: KVNamespace, overrides: EnvOverrides = {}): RuntimeEnv {
 	return {
 		STATE: state,
 		AI: { run: vi.fn() },
@@ -47,7 +54,7 @@ function env(state: KVNamespace, overrides: Partial<RuntimeEnv> & { SMTP_PASS?: 
 		NOTIFY_KEY: KEY,
 		NOTIFY_TO: "reader@example.invalid",
 		...overrides,
-	};
+	} as RuntimeEnv;
 }
 
 const feedFetch: typeof fetch = async () => new Response(rss);
@@ -64,6 +71,42 @@ describe("notification configuration", () => {
 		const kv = memoryKv();
 		expect(() => buildConfig(env(kv.state, { NOTIFY_TYPE: "invalid" }))).toThrow(/NOTIFY_TYPE/);
 		expect(() => buildConfig(env(kv.state, { NOTIFY_USE_PRESET: "invalid" }))).toThrow(/NOTIFY_USE_PRESET/);
+	});
+});
+
+describe("feed sources configuration", () => {
+	it("解析 FEEDS，缺省 label 用 name；未配置时回退 FEED_URL", () => {
+		const kv = memoryKv();
+		const configured = buildConfig(env(kv.state, {
+			FEEDS: JSON.stringify([
+				{ name: "LowEndTalk", label: "LET", url: "https://lowendtalk.com/categories/offers/feed.rss" },
+				{ name: "LowEndBox", url: "https://lowendbox.com/feed/?cat=3" },
+			]),
+		}));
+		expect(configured.feeds).toEqual([
+			{ name: "LowEndTalk", label: "LET", url: "https://lowendtalk.com/categories/offers/feed.rss" },
+			{ name: "LowEndBox", label: "LowEndBox", url: "https://lowendbox.com/feed/?cat=3" },
+		]);
+		expect(buildConfig(env(kv.state)).feeds).toEqual([
+			{ name: "LowEndTalk", label: "LET", url: "https://lowendtalk.com/categories/offers/feed.rss" },
+		]);
+	});
+
+	it("拒绝非法 FEEDS，缺来源时明确报错", () => {
+		const kv = memoryKv();
+		const base = env(kv.state);
+		expect(() => buildConfig({ ...base, FEEDS: "{" })).toThrow(/JSON/);
+		expect(() => buildConfig({ ...base, FEEDS: "[]" })).toThrow(/非空/);
+		expect(() => buildConfig({ ...base, FEEDS: JSON.stringify([{ name: "A" }]) })).toThrow(/url/);
+		expect(() => buildConfig({ ...base, FEEDS: JSON.stringify([{ name: "A", url: "ftp://example.invalid" }]) })).toThrow(/http/);
+		expect(() => buildConfig({
+			...base,
+			FEEDS: JSON.stringify([
+				{ name: "A", label: "X", url: "https://a.invalid/feed" },
+				{ name: "B", label: "X", url: "https://b.invalid/feed" },
+			]),
+		})).toThrow(/重复/);
+		expect(() => buildConfig({ ...base, FEEDS: "", FEED_URL: "" })).toThrow(/FEEDS/);
 	});
 });
 
@@ -229,7 +272,7 @@ describe("console tests", () => {
 	it("surfaces persistence failure after test delivery without resending or claiming mail failure", async () => {
 		const kv = memoryKv();
 		kv.put.mockRejectedValue(new Error(`KV unavailable ${KEY}`));
-		const sendMail = vi.fn(async () => {});
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
 		const error = await runConsoleTest(env(kv.state), "mail", "reader@example.invalid", { sendMail, nowMs: () => NOW, log: quiet }).catch((exc: unknown) => exc);
 		expect(error).toBeInstanceOf(ConsoleTestError);
 		if (!(error instanceof ConsoleTestError)) throw error;
@@ -256,7 +299,7 @@ describe("cron persistence", () => {
 	it("persists pipeline completion and keeps existing sent/lastRun semantics", async () => {
 		const kv = memoryKv();
 		const saveState = vi.fn(async () => {});
-		const sendMail = vi.fn(async () => {});
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
 		await handleCron(env(kv.state), "0 * * * *", { loadState: async () => ({ sent: [] }), saveState, sendMail, aiChat: async () => verdict, fetchImpl: feedFetch, nowMs: () => NOW, log: quiet }, NOW - 1000);
 		expect(sendMail).toHaveBeenCalledTimes(1);
 		expect(saveState).toHaveBeenCalledWith({ sent: ["https://example.invalid/latest", "https://example.invalid/earlier"], lastRun: new Date(NOW - 1000).toISOString() });
@@ -269,7 +312,7 @@ describe("cron persistence", () => {
 	it("does not send an alert for persistence failure after delivery", async () => {
 		const kv = memoryKv();
 		kv.put.mockRejectedValue(new Error("log storage unavailable"));
-		const sendMail = vi.fn(async () => {});
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
 		const saveState = vi.fn(async () => {});
 		const promise = handleCron(env(kv.state), "0 * * * *", { loadState: async () => ({ sent: [] }), saveState, sendMail, aiChat: async () => verdict, fetchImpl: feedFetch, nowMs: () => NOW, log: quiet });
 		await expect(promise).rejects.toThrow("运行日志保存失败");
@@ -302,5 +345,123 @@ describe("cron persistence", () => {
 		expect(JSON.stringify(output.mock.calls)).toContain("告警邮件也发不出去");
 		expect(JSON.stringify(output.mock.calls)).toContain("运行日志保存失败");
 		expect(kv.put).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("multi-source pipeline", () => {
+	it("一个来源失败时继续处理另一个，并在邮件里标注", async () => {
+		const kv = memoryKv();
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
+		const saveState = vi.fn(async () => {});
+		const fetchImpl: typeof fetch = async (input) => {
+			if (String(input).includes("leb.invalid")) throw new Error("LEB down");
+			return new Response(
+				`<rss><channel><item><title>LET VPS</title><link>https://let.invalid/1</link>` +
+					`<pubDate>Sun, 11 Oct 2026 11:00:00 GMT</pubDate><description>LET body</description></item></channel></rss>`,
+			);
+		};
+		const workerEnv = env(kv.state, {
+			FEEDS: JSON.stringify([
+				{ name: "LowEndTalk", label: "LET", url: "https://let.invalid/feed" },
+				{ name: "LowEndBox", label: "LEB", url: "https://leb.invalid/feed" },
+			]),
+			CLASSIFY_BATCH_SIZE: "2",
+		});
+		const aiChat = vi.fn(async () => JSON.stringify([{ i: 0, tags: ["vps"], prices: [], zh: "LET 摘要" }]));
+		await handleCron(
+			workerEnv,
+			"0 * * * *",
+			{ loadState: async () => ({ sent: [] }), saveState, sendMail, aiChat, fetchImpl, sleep: async () => {}, nowMs: () => NOW, log: quiet },
+			NOW - 1000,
+		);
+		expect(sendMail).toHaveBeenCalledTimes(1);
+		expect(sendMail.mock.calls[0]?.[0]).toContain("[LET]");
+		const html = sendMail.mock.calls[0]?.[1] as string;
+		expect(html).toContain("LET 摘要");
+		expect(html).toContain("LEB");
+		expect(html).toContain("抓取失败");
+		expect(saveState).toHaveBeenCalledWith({ sent: ["https://let.invalid/1"], lastRun: new Date(NOW - 1000).toISOString() });
+	});
+
+	it("两个来源都成功时主题合并来源标签", async () => {
+		const kv = memoryKv();
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
+		const fetchImpl: typeof fetch = async (input) => {
+			const leb = String(input).includes("leb.invalid");
+			const title = leb ? "LEB VPS" : "LET VPS";
+			const link = leb ? "https://leb.invalid/1" : "https://let.invalid/1";
+			const date = leb ? "Sun, 11 Oct 2026 10:00:00 GMT" : "Sun, 11 Oct 2026 11:00:00 GMT";
+			return new Response(
+				`<rss><channel><item><title>${title}</title><link>${link}</link>` +
+					`<pubDate>${date}</pubDate><description>${title} body</description></item></channel></rss>`,
+			);
+		};
+		const workerEnv = env(kv.state, {
+			FEEDS: JSON.stringify([
+				{ name: "LowEndTalk", label: "LET", url: "https://let.invalid/feed" },
+				{ name: "LowEndBox", label: "LEB", url: "https://leb.invalid/feed" },
+			]),
+			CLASSIFY_BATCH_SIZE: "2",
+		});
+		const aiChat = vi.fn(async (_system: string, user: string) => {
+			const verdicts: unknown[] = [];
+			if (user.includes("LET VPS")) verdicts.push({ i: 0, tags: ["vps"], prices: [], zh: "LET 摘要" });
+			if (user.includes("LEB VPS")) verdicts.push({ i: 1, tags: ["vps"], prices: [], zh: "LEB 摘要" });
+			return JSON.stringify(verdicts);
+		});
+		await handleCron(
+			workerEnv,
+			"0 * * * *",
+			{ loadState: async () => ({ sent: [] }), saveState: async () => {}, sendMail, aiChat, fetchImpl, sleep: async () => {}, nowMs: () => NOW, log: quiet },
+			NOW - 1000,
+		);
+		expect(sendMail.mock.calls[0]?.[0]).toContain("[LET+LEB]");
+		const html = sendMail.mock.calls[0]?.[1] as string;
+		expect(html).toContain("LET 摘要");
+		expect(html).toContain("LEB 摘要");
+	});
+
+
+	it("全部来源失败时抛错并发送告警，状态不变", async () => {
+		const kv = memoryKv();
+		const sendMail = vi.fn(async (_subject: string, _html: string, _text: string) => {});
+		const saveState = vi.fn(async () => {});
+		const fetchImpl: typeof fetch = async () => { throw new Error("all feeds down"); };
+		const workerEnv = env(kv.state, {
+			FEEDS: JSON.stringify([
+				{ name: "LowEndTalk", label: "LET", url: "https://let.invalid/feed" },
+				{ name: "LowEndBox", label: "LEB", url: "https://leb.invalid/feed" },
+			]),
+		});
+		await expect(handleCron(
+			workerEnv,
+			"0 * * * *",
+			{ loadState: async () => ({ sent: [] }), saveState, sendMail, aiChat: vi.fn(), fetchImpl, sleep: async () => {}, nowMs: () => NOW, log: quiet },
+			NOW - 1000,
+		)).rejects.toThrow(/所有 RSS 来源/);
+		expect(sendMail).toHaveBeenCalledTimes(1);
+		expect(sendMail.mock.calls[0]?.[0]).toContain("监控运行失败");
+		expect(saveState).not.toHaveBeenCalled();
+	});
+
+	it("RSS 测试按来源显示条数", async () => {
+		const kv = memoryKv();
+		const fetchImpl: typeof fetch = async (input) => {
+			const leb = String(input).includes("leb.invalid");
+			return new Response(
+				`<rss><channel><item><title>${leb ? "LEB" : "LET"}</title>` +
+					`<link>https://${leb ? "leb" : "let"}.invalid/1</link>` +
+					`<pubDate>Sun, 11 Oct 2026 11:00:00 GMT</pubDate><description>body</description></item></channel></rss>`,
+			);
+		};
+		const workerEnv = env(kv.state, {
+			FEEDS: JSON.stringify([
+				{ name: "LowEndTalk", label: "LET", url: "https://let.invalid/feed" },
+				{ name: "LowEndBox", label: "LEB", url: "https://leb.invalid/feed" },
+			]),
+		});
+		const result = await runConsoleTest(workerEnv, "feed", "reader@example.invalid", { fetchImpl, nowMs: () => NOW, log: quiet });
+		expect(result.result.message).toContain("LET 1 条");
+		expect(result.result.message).toContain("LEB 1 条");
 	});
 });

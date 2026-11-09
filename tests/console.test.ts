@@ -91,6 +91,18 @@ describe("console authorization and input boundaries", () => {
 		expect(body).not.toContain("private-preset-key");
 	});
 
+	it("概要返回已配置来源标签", async () => {
+		const { env } = fixture();
+		env.FEEDS = JSON.stringify([
+			{ name: "LowEndTalk", label: "LET", url: "https://lowendtalk.com/categories/offers/feed.rss" },
+			{ name: "LowEndBox", label: "LEB", url: "https://lowendbox.com/feed/?cat=3" },
+		]);
+		const response = await handleConsole(req("/api/overview"), env, authenticated);
+		expect(response.status).toBe(200);
+		const body = await response.json() as { sources?: string[] };
+		expect(body.sources).toEqual(["LET", "LEB"]);
+	});
+
 	it("拒绝非法分页和越界 pageSize，不将大批数据回传", async () => {
 		const { env, get } = fixture();
 		for (const query of ["page=0", "page=-1", "page=1.5", "page=1e3", "pageSize=101", "pageSize=0", "page=1000001"]) {

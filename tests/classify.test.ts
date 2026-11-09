@@ -12,7 +12,7 @@ const PARSED = [{ i: 0, tags: ["vps"], prices: [{ amount: 3, currency: "USD", pe
 
 function cfg(): MonitorConfig {
 	return {
-		feedUrl: "https://example.invalid/feed",
+		feeds: [{ name: "Test", label: "T", url: "https://example.invalid/feed" }],
 		lookbackDays: 7,
 		maxPosts: 60,
 		classifyBatchSize: 10,

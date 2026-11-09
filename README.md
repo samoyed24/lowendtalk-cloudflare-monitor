@@ -1,8 +1,8 @@
 # lowendtalk-cloudflare-monitor
 
-定时抓取 [LowEndTalk](https://lowendtalk.com) 的 Offers 板块，用 Workers AI 打标签并生成中文摘要，去重后把新增条目邮件推送。
+定时抓取 [LowEndTalk](https://lowendtalk.com) 的 Offers 板块和 [LowEndBox](https://lowendbox.com) 的 VPS 分类 feed，用 Workers AI 打标签并生成中文摘要，去重后把新增条目邮件推送。
 
-跑在 **Cloudflare Worker Cron** 上：定时唤醒 → 抓取 → AI 打标 → 去重 → 发信。状态存在 KV，AI 走 Workers AI 绑定，发信走 Portcloud Notify（推荐）或自定义 SMTP。
+跑在 **Cloudflare Worker Cron** 上：定时唤醒 → 按来源抓取 → AI 打标 → 去重 → 发信。状态存在 KV，AI 走 Workers AI 绑定，发信走 Portcloud Notify（推荐）或自定义 SMTP。
 
 ---
 
@@ -120,8 +120,8 @@ workflow 会自动：
 | 参数 | 默认值 | 怎么改 |
 |---|---|---|
 | `AI_MODEL` | `@cf/qwen/qwen3-30b-a3b-fp8` | 改 `wrangler.jsonc` 里的 `vars`，提交后**重跑 workflow** |
-| `FEED_URL` | LET Offers RSS | 同上 |
-| `LOOKBACK_DAYS` / `MAX_POSTS` | `7` / `60` | 同上 |
+| `FEEDS` | LET Offers + LEB VPS | 同上；JSON 数组，见[来源（FEEDS）](#来源feeds) |
+| `LOOKBACK_DAYS` / `MAX_POSTS` | `7` / `60` | 同上；`MAX_POSTS` 按来源分别计算 |
 | `CLASSIFY_BATCH_SIZE` | `1` | 同上 |
 | `REQUIRE_SERVER_TAG` | `true` | 同上 |
 | `INTERVAL_MINUTES` | `60` | 同上，且要同步改 cron（见[第四节](#四推送间隔)） |
@@ -155,11 +155,12 @@ workflow 会自动：
 | Variable | 默认值 | 说明 |
 |---|---|---|
 | `AI_MODEL` | `@cf/qwen/qwen3-30b-a3b-fp8` | Workers AI 模型；默认 Qwen3 30B A3B，调用时追加 `/no_think`，并用 JSON Schema 约束分类输出结构 |
-| `FEED_URL` | LET Offers 板块 RSS | 抓取源，Worker 直连读取 |
+| `FEEDS` | LET + LEB | JSON 数组，每个来源为 `{name,label,url}`；`label` 用于邮件徽章和主题前缀。最多 5 个，详见[来源（FEEDS）](#来源feeds) |
+| `FEED_URL` | 无（仅兼容旧配置） | 未配置 `FEEDS` 时作为单源简写，标签固定为 `LET`；与 `FEEDS` 同时存在时忽略 |
 | `LOOKBACK_DAYS` | `7` | 只处理最近 N 天的帖子 |
-| `MAX_POSTS` | `60` | 单次送进 AI 的条数上限 |
+| `MAX_POSTS` | `60` | **每个来源**单次送进 AI 的条数上限，避免高频来源挤掉低频来源 |
 | `CLASSIFY_BATCH_SIZE` | `1` | 单次 AI 分类的条数；完整正文默认每次 1 帖，避免多篇长文挤占上下文。调大会减少调用次数，但更容易超出模型限制 |
-| `REQUIRE_SERVER_TAG` | `true` | 只推送带服务器类型标签的条目 |
+| `REQUIRE_SERVER_TAG` | `true` | 只推送带服务器类型标签的条目；LEB 使用 VPS 分类 feed 从源头排除新闻/邮箱/备份/托管，这里再按 AI 标签兜底，接受少量误判 |
 | `INTERVAL_MINUTES` | `60` | 推送间隔（分钟），与 cron 保持一致 |
 | `NOTIFY_USE_PRESET` | `false` | `true` 使用服务端默认通道链，只需 `NOTIFY_KEY`；缺少 key 属于配置错误。完全忽略 `NOTIFY_TO` / `NOTIFY_TYPE`，包括无效值 |
 | `NOTIFY_TYPE` | `email` | 普通模式只支持 `email` / `ntfy`，分别配合已验证邮箱 / 自己已添加通道的完整 canonical ntfy topic；preset 模式忽略 |
@@ -167,6 +168,25 @@ workflow 会自动：
 | `NOTIFY_TIMEOUT` | `60` | Portcloud Notify 轮询投递结果的总预算（秒），须为正整数（兼容旧 `PC_TIMEOUT`） |
 | `SMTP_HOST` | `smtp.qq.com` | 自定义 SMTP 服务器 |
 | `SMTP_PORT` | `465` | 465（隐式 TLS）或 587（STARTTLS）；25 被 Cloudflare 禁止 |
+
+### 来源（FEEDS）
+
+默认抓取两个来源：
+
+| 标签 | 名称 | Feed | 说明 |
+|---|---|---|---|
+| `LET` | LowEndTalk | `https://lowendtalk.com/categories/offers/feed.rss` | Offers 板块，商家自发帖，更新快 |
+| `LEB` | LowEndBox | `https://lowendbox.com/feed/?cat=3` | Low End Virtual 分类，只含 VPS；不含 Editorial/News、Giveaways、邮箱、备份、托管 |
+
+`FEEDS` 是 JSON 数组，每项为 `{ "name": "...", "label": "...", "url": "..." }`。`name` 显示在邮件页脚，`label` 是邮件徽章和主题前缀（如 `[LET+LEB]`），`label` 省略时用 `name`。最多 5 个来源。
+
+```jsonc
+"FEEDS": "[{\"name\":\"LowEndTalk\",\"label\":\"LET\",\"url\":\"https://lowendtalk.com/categories/offers/feed.rss\"},{\"name\":\"LowEndBox\",\"label\":\"LEB\",\"url\":\"https://lowendbox.com/feed/?cat=3\"}]"
+```
+
+LEB 的 `?cat=3` 是 WordPress 分类 ID（Low End Virtual）。只想看 VPS 时保留它即可；想连邮箱/备份/托管一起看，把分类改成 `3,3719`（Special Offers），但会混入非 VPS 内容。旧的单源部署仍可用 `FEED_URL`，未配置 `FEEDS` 时它会作为一个标签为 `LET` 的来源。
+
+单个来源抓取失败不会阻断其他来源：失败的来源会跳过并写入运行日志，本次有邮件时还会在邮件底部备注；全部来源失败才按运行失败告警。非服务器内容由 `REQUIRE_SERVER_TAG` 兜底过滤，接受少量误判。去重只按 URL：同一活动如果在 LET 和 LEB 各有一帖（URL 不同），会分别推送一次，不做跨站标题匹配。
 
 ### Portcloud Notify 请求与投递结果
 
@@ -218,16 +238,18 @@ HTTP 细节交给官方 SDK `portcloud-notify`（`src/monitor.ts` 的 `notifyCli
 ```
 唤醒（Worker Cron，默认 0 * * * * UTC）
   └─ 间隔检查    距上次运行不足 INTERVAL_MINUTES（默认 60）则跳过
-     └─ 抓取     直连 FEED_URL 取 RSS
-        └─ 解析  RSS → 条目 / 时间窗口 / HTML 实体解码 / 剥离重复标题
+     └─ 抓取     按 FEEDS 逐来源取 RSS（单源失败跳过）
+        └─ 解析  RSS → 条目 / 时间窗口 / 来源标签 / HTML 实体解码 / 剥离重复标题
            └─ 打标 Workers AI（env.AI）输出 tags + prices + 中文摘要
               └─ 整理 按最低月均价排序
                  └─ 去重 与 KV 状态比对，取新增
-                    └─ 发信 有新增才发送（Portcloud Notify / 自定义 SMTP，配了几个发几个）
+                    └─ 发信 有新增才发送（主题/徽章带来源，失败来源写入备注）
                        └─ 存状态（KV）
 ```
 
-状态（已推送 URL + 上次运行时间）存在 `STATE` KV 里。**投递成功后**才写状态；运行失败时状态不变，这批帖子下次重新处理。任何异常都会抛给 Cron（在 Cron Events 里记为失败），并发送一封 `🚨` 开头的告警邮件。
+状态（已推送 URL + 上次运行时间）存在 `STATE` KV 里。**投递成功后**才写状态；运行失败时状态不变，这批帖子下次重新处理。单个来源抓取失败不会抛错：该来源本轮跳过，其他来源照常处理，并在运行日志里说明；本次有邮件时还会写入邮件底部备注；全部来源失败，或 AI/发信异常，才会抛给 Cron（在 Cron Events 里记为失败），并发送一封 `🚨` 开头的告警邮件。
+
+默认来源是 LET Offers 与 LEB 的 Low End Virtual 分类。LEB 已用分类 feed 排除新闻、访谈、抽奖、邮箱、备份和托管；仍有少量误判可能，由 `REQUIRE_SERVER_TAG` 兜底过滤。邮件主题形如 `[LET+LEB] 低价VPS N 条`，每条帖子带来源徽章。
 
 标签体系：每条帖子会被打上一组标签，并在邮件里以徽章展示。
 
@@ -241,7 +263,7 @@ HTTP 细节交给官方 SDK `portcloud-notify`（`src/monitor.ts` 的 `notifyCli
 
 正文读取 RSS 的 `description`（`content:encoded` 优先），去掉 HTML 标签后完整送入 AI，不再按字符数截断。它不会另外打开原帖页面：RSS 本身没提供的内容和图片里的文字仍无法据此总结。
 
-默认每次分析 1 帖，避免多篇完整正文挤占上下文；调用次数和总耗时会比批量处理更多。默认模型的[上下文上限为 32,768 tokens](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)，还需为提示词和输出预留空间，因此单篇异常长文仍可能超限。本项目不自动分段；若 AI 接口报错，则按运行失败处理，而不是主动截断正文。
+默认每次分析 1 帖，避免多篇完整正文挤占上下文；调用次数和总耗时会比批量处理更多。每个来源最多取 `MAX_POSTS` 条。默认模型的[上下文上限为 32,768 tokens](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)，还需为提示词和输出预留空间，因此单篇异常长文仍可能超限。本项目不自动分段；若 AI 接口报错，则按运行失败处理，而不是主动截断正文。
 
 中文摘要要求正文信息充足时写 150–300 字，覆盖商家与机房、主要套餐的配置及对应价格、网络与 IP、优惠码、首期/续费条件及限制。信息不足时允许更短，不补猜缺失参数；实际字数和准确性仍取决于模型输出。HTML 与纯文本邮件均保留完整摘要。已推送的帖子仍按原状态去重，不会因为修改摘要而重新发送。
 
@@ -339,11 +361,11 @@ npx wrangler tail  # 看线上日志
 
 | 功能 | 行为 |
 |---|---|
-| 概览 | 查看已处理数量、上次成功写入状态的时间、推送间隔、模型与已配置的发信通道 |
+| 概览 | 查看已处理数量、上次成功写入状态的时间、推送间隔、来源、模型与已配置的发信通道 |
 | 已处理记录 | 查看去重 URL，按最近处理顺序分页；已处理不等于已发送邮件 |
 | 运行日志 | 查看定时任务及网页测试的完成结果、执行账号和日志明细；运行列表与明细分别分页 |
-| RSS 测试 | 抓取并解析当前源，显示条数及最新标题，不发信 |
-| AI 单篇预览 | 分析窗口内最新一帖，忽略去重，在隔离页面显示邮件预览；不发信、不改去重状态 |
+| RSS 测试 | 抓取并解析所有已配置来源，按来源显示条数及最新标题，不发信 |
+| AI 单篇预览 | 分析所有来源中最新的一帖，忽略去重，在隔离页面显示邮件预览；不发信、不改去重状态 |
 | 测试邮件 | 再次确认后，通过全部已配置通道向配置中的收件地址发信；不改去重状态 |
 
 每页可选 20、50、100 条，接口最多返回 100 条。已处理记录沿用现有最多 5,000 个 URL 的去重状态。运行日志保存到同一个 `STATE` KV，保留 30 天；每次完成后保存，最多 300 条消息，每条最多 2,000 字符，超出部分标记截断。旧版未持久化的日志不会补录。

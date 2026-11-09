@@ -25,7 +25,9 @@
 	// 非敏感配置。secrets（NOTIFY_KEY / NOTIFY_TO / SMTP_*，兼容旧 PC_*）用 wrangler secret put 设置，不进版本库。
 	"vars": {
 		"AI_MODEL": "@cf/qwen/qwen3-30b-a3b-fp8",
-		"FEED_URL": "https://lowendtalk.com/categories/offers/feed.rss",
+		// 多来源：name 显示名，label 用于邮件徽章/主题，url 为 RSS。最多 5 个。
+		// LowEndBox 用 Low End Virtual 分类 feed（?cat=3），只取 VPS，不含新闻/邮箱/备份/托管。
+		"FEEDS": "[{\"name\":\"LowEndTalk\",\"label\":\"LET\",\"url\":\"https://lowendtalk.com/categories/offers/feed.rss\"},{\"name\":\"LowEndBox\",\"label\":\"LEB\",\"url\":\"https://lowendbox.com/feed/?cat=3\"}]",
 		"LOOKBACK_DAYS": "7",
 		"MAX_POSTS": "60",
 		"CLASSIFY_BATCH_SIZE": "1",

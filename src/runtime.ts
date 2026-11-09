@@ -1,11 +1,13 @@
 // Worker bindings and run execution; each invocation owns its own persisted log buffer.
-import { buildAlert, buildDigest, classify, fetchFeed, merge, parsePosts, runPipeline, sendMail } from "./monitor";
-import type { Deps, MonitorConfig, PipelineState, RunHandlers } from "./monitor";
+import { buildAlert, buildDigest, classify, fetchFeeds, merge, parsePosts, runPipeline, sendMail } from "./monitor";
+import type { Deps, FeedSource, MonitorConfig, PipelineState, RunHandlers } from "./monitor";
 import { createRedactor, RunLog } from "./run-store";
 import type { RunKind } from "./run-store";
 
-export type RuntimeEnv = Omit<Env, "AI" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE"> & {
+export type RuntimeEnv = Omit<Env, "AI" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE" | "FEED_URL" | "FEEDS"> & {
 	AI: Pick<Ai, "run">;
+	FEEDS?: string;
+	FEED_URL?: string;
 	NOTIFY_USE_PRESET?: string;
 	NOTIFY_TYPE?: string;
 };
@@ -55,6 +57,7 @@ function readInt(raw: string | undefined, fallback: number): number {
 }
 
 type AppEnv = RuntimeEnv & {
+	FEEDS?: string;
 	NOTIFY_URL?: string;
 	NOTIFY_TIMEOUT?: string;
 	NOTIFY_KEY?: string;
@@ -75,6 +78,52 @@ function envStr(env: AppEnv, key: "NOTIFY_KEY" | "NOTIFY_TO" | "PC_KEY" | "PC_TO
 	return typeof v === "string" ? v : "";
 }
 
+/**
+ * FEEDS 是 JSON 数组：[{ name, label?, url }]。label 是邮件/日志里的短标签。
+ * 未配置 FEEDS 时回退到单源 FEED_URL（兼容旧部署与单测）。
+ */
+function parseFeedSources(env: AppEnv): FeedSource[] {
+	const raw = String(env.FEEDS ?? "").trim();
+	if (raw === "") {
+		const url = String(env.FEED_URL ?? "").trim();
+		if (url === "") throw new Error("缺少 RSS 来源：请设置 FEEDS（JSON 数组）或 FEED_URL");
+		return [{ name: "LowEndTalk", label: "LET", url }];
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("FEEDS 必须是合法的 JSON 数组");
+	}
+	if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("FEEDS 必须是非空 JSON 数组");
+	if (parsed.length > 5) throw new Error("FEEDS 最多支持 5 个来源");
+	const out: FeedSource[] = [];
+	const labels = new Set<string>();
+	for (const [index, entry] of parsed.entries()) {
+		if (typeof entry !== "object" || entry === null) throw new Error(`FEEDS 第 ${index + 1} 项必须是对象`);
+		const record = entry as Record<string, unknown>;
+		const name = typeof record.name === "string" ? record.name.trim() : "";
+		const labelRaw = typeof record.label === "string" ? record.label.trim() : "";
+		const url = typeof record.url === "string" ? record.url.trim() : "";
+		if (name === "") throw new Error(`FEEDS 第 ${index + 1} 项缺少 name`);
+		if (url === "") throw new Error(`FEEDS 第 ${index + 1} 项缺少 url`);
+		let parsedUrl: URL;
+		try {
+			parsedUrl = new URL(url);
+		} catch {
+			throw new Error(`FEEDS 第 ${index + 1} 项的 url 不合法`);
+		}
+		if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+			throw new Error(`FEEDS 第 ${index + 1} 项的 url 必须是 http(s)`);
+		}
+		const label = labelRaw === "" ? name : labelRaw;
+		if (labels.has(label)) throw new Error(`FEEDS 来源标签重复：${label}`);
+		labels.add(label);
+		out.push({ name, label, url });
+	}
+	return out;
+}
+
 export function buildConfig(env: AppEnv): MonitorConfig {
 	const requireTag = String(env.REQUIRE_SERVER_TAG);
 	const notifyTimeoutRaw = readInt(String(env.NOTIFY_TIMEOUT ?? env.PC_TIMEOUT), 60);
@@ -91,7 +140,7 @@ export function buildConfig(env: AppEnv): MonitorConfig {
 	const notifyKey = envStr(env, "NOTIFY_KEY") || envStr(env, "PC_KEY");
 	if (notifyUsePreset && !notifyKey) throw new Error("发送预设需要配置 NOTIFY_KEY");
 	return {
-		feedUrl: String(env.FEED_URL),
+		feeds: parseFeedSources(env),
 		lookbackDays: readInt(String(env.LOOKBACK_DAYS), 7),
 		maxPosts: readInt(String(env.MAX_POSTS), 60),
 		classifyBatchSize: readInt(String(env.CLASSIFY_BATCH_SIZE), 1),
@@ -223,7 +272,8 @@ export async function handleCron(env: RuntimeEnv, cron: string, deps: RuntimeDep
 	let message = "";
 	try {
 		const result = await runPipeline(cfg, { scheduledAt }, handlers, d);
-		message = `完成（cron=${cron}）：${result.emailed ? `已推送 ${result.items ?? 0} 条` : "无新增"}`;
+		const partial = (result.warnings ?? []).length > 0 ? "（部分来源抓取失败）" : "";
+		message = `完成（cron=${cron}）：${result.emailed ? `已推送 ${result.items ?? 0} 条` : "无新增"}${partial}`;
 		run.log(message);
 	} catch (exc) {
 		failed = true;
@@ -262,19 +312,29 @@ export async function runConsoleTest(env: RuntimeEnv, kind: Exclude<RunKind, "cr
 	let failure: string | undefined;
 	try {
 		if (kind === "mail") {
-			const text = `LowEndTalk 控制台测试邮件\n\n这是手动触发的测试邮件，不会改变帖子处理状态。\n时间：${new Date(nowMs()).toISOString()}`;
-			await handlers.send("[LET] 控制台测试邮件", "<p>LowEndTalk 控制台测试邮件：发信通道连接成功。本次测试不会改变帖子处理状态。</p>", text);
+			const labels = cfg.feeds.map((f) => f.label).join("+") || "RSS";
+			const text = `低价监控控制台测试邮件\n\n这是手动触发的测试邮件，不会改变帖子处理状态。\n时间：${new Date(nowMs()).toISOString()}`;
+			await handlers.send(`[${labels}] 控制台测试邮件`, "<p>低价监控控制台测试邮件：发信通道连接成功。本次测试不会改变帖子处理状态。</p>", text);
 			result = { message: "测试邮件已通过所有已配置通道发送；未修改帖子处理状态。" };
 		} else {
-			const feed = await fetchFeed(cfg, d);
-			const posts = parsePosts(feed, kind === "preview" ? { ...cfg, maxPosts: 1 } : cfg, nowMs());
+			const feed = await fetchFeeds(cfg, d);
+			const warnings = feed.warnings ?? [];
+			const posts = parsePosts(feed, cfg, nowMs());
 			if (kind === "feed") {
-				result = { message: `RSS 抓取成功：${feed.items.length} 条，窗口内保留 ${posts.length} 条。最新标题：${posts[0]?.title.slice(0, 200) ?? "（窗口内无帖子）"}` };
-			} else {
-				const items = merge(await classify(posts, cfg, handlers.aiChat, d), posts, cfg.requireServerTag);
-				const digest = buildDigest(items, nowMs());
+				const counts = (feed.counts ?? []).map((c) => `${c.label} ${c.total} 条`).join("、") || "无成功来源";
+				const headline = warnings.length > 0 ? "RSS 部分来源抓取失败" : "RSS 抓取成功";
+				const warningText = warnings.length > 0 ? `；${warnings.join("；")}` : "";
 				result = {
-					message: `已预览最新 ${posts.length} 条帖子，匹配 ${items.length} 条；忽略去重、不改状态、不发信。${posts[0] === undefined ? "" : ` 最新标题：${posts[0].title.slice(0, 200)}`}`,
+					message: `${headline}：${counts}；窗口内保留 ${posts.length} 条。最新标题：${posts[0]?.title.slice(0, 200) ?? "（窗口内无帖子）"}${warningText}`,
+				};
+			} else if (posts.length === 0) {
+				result = { message: "窗口内没有帖子；忽略去重、不改状态、不发信。" };
+			} else {
+				const latest = posts.slice(0, 1);
+				const items = merge(await classify(latest, cfg, handlers.aiChat, d), latest, cfg.requireServerTag);
+				const digest = buildDigest(items, nowMs(), warnings);
+				result = {
+					message: `已预览最新 1 条（来源 ${latest[0]?.source ?? "RSS"}），匹配 ${items.length} 条；忽略去重、不改状态、不发信。${latest[0] === undefined ? "" : ` 最新标题：${latest[0].title.slice(0, 200)}`}`,
 					html: digest.html,
 				};
 			}

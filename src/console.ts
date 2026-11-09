@@ -99,7 +99,8 @@ export async function handleConsole(request: Request, env: RuntimeEnv, ctx: Pick
 			if (hasNotifyChannel(config)) channels.push("Portcloud Notify");
 			if (hasSmtpChannel(config)) channels.push("SMTP");
 			return json({ email: identity.email, processed: state.sent.length, lastRun: state.lastRun ?? null,
-				intervalMinutes: config.intervalMinutes, aiModel: config.aiModel, channels, logRetentionDays: 30 });
+				intervalMinutes: config.intervalMinutes, aiModel: config.aiModel, channels,
+				sources: config.feeds.map((source) => source.label), logRetentionDays: 30 });
 		}
 		if (url.pathname === "/api/records") {
 			const page = integer(url.searchParams, "page", 1, 1_000_000);
