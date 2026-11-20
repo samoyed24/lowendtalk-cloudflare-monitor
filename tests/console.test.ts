@@ -10,7 +10,7 @@ function fixture(sent: string[] = []) {
 	const env: RuntimeEnv = {
 		STATE: { get, put: vi.fn(), list: vi.fn(), delete: vi.fn(), getWithMetadata: vi.fn() },
 		AI: { run: vi.fn() },
-		AI_MODEL: "@cf/qwen/qwen3-30b-a3b-fp8", FEED_URL: "https://lowendtalk.com/categories/offers/feed.rss",
+		AI_MODEL: "@cf/google/gemma-4-26b-a4b-it", FEED_URL: "https://lowendtalk.com/categories/offers/feed.rss",
 		LOOKBACK_DAYS: "7", MAX_POSTS: "60", CLASSIFY_BATCH_SIZE: "1", REQUIRE_SERVER_TAG: "true",
 		INTERVAL_MINUTES: "60", NOTIFY_URL: "https://notify.portcloud.online", NOTIFY_TIMEOUT: "60",
 		SMTP_HOST: "smtp.qq.com", SMTP_PORT: "465", NOTIFY_KEY: "", NOTIFY_TO: "",

@@ -40,7 +40,7 @@ function env(state: KVNamespace, overrides: EnvOverrides = {}): RuntimeEnv {
 	return {
 		STATE: state,
 		AI: { run: vi.fn() },
-		AI_MODEL: "@cf/qwen/qwen3-30b-a3b-fp8",
+		AI_MODEL: "@cf/google/gemma-4-26b-a4b-it",
 		FEED_URL: "https://lowendtalk.com/categories/offers/feed.rss",
 		LOOKBACK_DAYS: "7",
 		MAX_POSTS: "60",
@@ -235,6 +235,38 @@ describe("console tests", () => {
 		const detail = await getRunPage(kv.state, result.runId, 1, 20);
 		expect(detail?.items.some((entry) => entry.message.includes("AI 调用失败 (1/3): [REDACTED]"))).toBe(true);
 		expect(detail?.items.at(-1)?.message).toContain("不发信");
+	});
+
+	it("对支持结构化输出的模型关闭 thinking 并从 ChatCompletions 响应提取结果", async () => {
+		const kv = memoryKv();
+		const workerEnv = env(kv.state);
+		const aiRun = vi.fn().mockResolvedValue({
+			choices: [{ message: { content: JSON.stringify({ items: JSON.parse(verdict) }) } }],
+		});
+		workerEnv.AI = { run: aiRun };
+		const result = await runConsoleTest(workerEnv, "preview", "reader@example.invalid", { fetchImpl: feedFetch, nowMs: () => NOW, log: quiet });
+		expect(result.result.html).toContain("测试 VPS 摘要");
+		const [model, input] = aiRun.mock.calls[0] as [string, Record<string, unknown>];
+		expect(model).toBe("@cf/google/gemma-4-26b-a4b-it");
+		expect(input.chat_template_kwargs).toEqual({ enable_thinking: false });
+		expect(input.response_format).toMatchObject({
+			type: "json_schema",
+			json_schema: { name: "classify_verdicts", strict: true, schema: { type: "object", required: ["items"] } },
+		});
+		const messages = input.messages as Array<{ role: string; content: string }>;
+		expect(messages[1]?.content).not.toContain("/no_think");
+	});
+
+	it("对其他自定义模型不注入 thinking 开关和专属 JSON Schema", async () => {
+		const kv = memoryKv();
+		const workerEnv = env(kv.state, { AI_MODEL: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" });
+		const aiRun = vi.fn().mockResolvedValue({ response: verdict });
+		workerEnv.AI = { run: aiRun };
+		await runConsoleTest(workerEnv, "preview", "reader@example.invalid", { fetchImpl: feedFetch, nowMs: () => NOW, log: quiet });
+		const [model, input] = aiRun.mock.calls[0] as [string, Record<string, unknown>];
+		expect(model).toBe("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+		expect(input.chat_template_kwargs).toBeUndefined();
+		expect(input.response_format).toBeUndefined();
 	});
 
 	it("uses configured Notify mail with delivery logs and never updates dedup", async () => {

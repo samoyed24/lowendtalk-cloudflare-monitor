@@ -119,7 +119,7 @@ workflow 会自动：
 
 | 参数 | 默认值 | 怎么改 |
 |---|---|---|
-| `AI_MODEL` | `@cf/qwen/qwen3-30b-a3b-fp8` | 改 `wrangler.jsonc` 里的 `vars`，提交后**重跑 workflow** |
+| `AI_MODEL` | `@cf/google/gemma-4-26b-a4b-it` | 改 `wrangler.jsonc` 里的 `vars`，提交后**重跑 workflow** |
 | `FEEDS` | LET Offers + LEB VPS | 同上；JSON 数组，见[来源（FEEDS）](#来源feeds) |
 | `LOOKBACK_DAYS` / `MAX_POSTS` | `7` / `60` | 同上；`MAX_POSTS` 按来源分别计算 |
 | `CLASSIFY_BATCH_SIZE` | `1` | 同上 |
@@ -154,7 +154,7 @@ workflow 会自动：
 
 | Variable | 默认值 | 说明 |
 |---|---|---|
-| `AI_MODEL` | `@cf/qwen/qwen3-30b-a3b-fp8` | Workers AI 模型；默认 Qwen3 30B A3B，调用时追加 `/no_think`，并用 JSON Schema 约束分类输出结构 |
+| `AI_MODEL` | `@cf/google/gemma-4-26b-a4b-it` | Workers AI 模型；默认 Gemma 4 26B A4B，关闭 thinking 模式并用 JSON Schema 约束分类输出结构 |
 | `FEEDS` | LET + LEB | JSON 数组，每个来源为 `{name,label,url}`；`label` 用于邮件徽章和主题前缀。最多 5 个，详见[来源（FEEDS）](#来源feeds) |
 | `FEED_URL` | 无（仅兼容旧配置） | 未配置 `FEEDS` 时作为单源简写，标签固定为 `LET`；与 `FEEDS` 同时存在时忽略 |
 | `LOOKBACK_DAYS` | `7` | 只处理最近 N 天的帖子 |
@@ -263,7 +263,7 @@ HTTP 细节交给官方 SDK `portcloud-notify`（`src/monitor.ts` 的 `notifyCli
 
 正文读取 RSS 的 `description`（`content:encoded` 优先），去掉 HTML 标签后完整送入 AI，不再按字符数截断。它不会另外打开原帖页面：RSS 本身没提供的内容和图片里的文字仍无法据此总结。
 
-默认每次分析 1 帖，避免多篇完整正文挤占上下文；调用次数和总耗时会比批量处理更多。每个来源最多取 `MAX_POSTS` 条。默认模型的[上下文上限为 32,768 tokens](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)，还需为提示词和输出预留空间，因此单篇异常长文仍可能超限。本项目不自动分段；若 AI 接口报错，则按运行失败处理，而不是主动截断正文。
+默认每次分析 1 帖，避免多篇完整正文挤占上下文；调用次数和总耗时会比批量处理更多。每个来源最多取 `MAX_POSTS` 条。默认模型的[上下文上限为 256,000 tokens](https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/)，还需为提示词和输出预留空间，因此单篇异常长文仍可能超限。本项目不自动分段；若 AI 接口报错，则按运行失败处理，而不是主动截断正文。
 
 中文摘要要求正文信息充足时写 150–300 字，覆盖商家与机房、主要套餐的配置及对应价格、网络与 IP、优惠码、首期/续费条件及限制。信息不足时允许更短，不补猜缺失参数；实际字数和准确性仍取决于模型输出。HTML 与纯文本邮件均保留完整摘要。已推送的帖子仍按原状态去重，不会因为修改摘要而重新发送。
 

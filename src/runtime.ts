@@ -4,8 +4,9 @@ import type { Deps, FeedSource, MonitorConfig, PipelineState, RunHandlers } from
 import { createRedactor, RunLog } from "./run-store";
 import type { RunKind } from "./run-store";
 
-export type RuntimeEnv = Omit<Env, "AI" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE" | "FEED_URL" | "FEEDS"> & {
+export type RuntimeEnv = Omit<Env, "AI" | "AI_MODEL" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE" | "FEED_URL" | "FEEDS"> & {
 	AI: Pick<Ai, "run">;
+	AI_MODEL: string;
 	FEEDS?: string;
 	FEED_URL?: string;
 	NOTIFY_USE_PRESET?: string;
@@ -13,34 +14,56 @@ export type RuntimeEnv = Omit<Env, "AI" | "NOTIFY_USE_PRESET" | "NOTIFY_TYPE" | 
 };
 
 const CLASSIFY_RESPONSE_FORMAT = {
-	type: "json_schema",
+	type: "json_schema" as const,
 	json_schema: {
-		type: "array",
-		items: {
+		name: "classify_verdicts",
+		strict: true,
+		schema: {
 			type: "object",
 			properties: {
-				i: { type: "integer" },
-				tags: { type: "array", items: { type: "string" } },
-				prices: {
+				items: {
 					type: "array",
 					items: {
 						type: "object",
 						properties: {
-							amount: { type: "number" },
-							currency: { type: ["string", "null"] },
-							period: { type: "string" },
+							i: { type: "integer" },
+							tags: { type: "array", items: { type: "string" } },
+							prices: {
+								type: "array",
+								items: {
+									type: "object",
+									properties: {
+										amount: { type: "number" },
+										currency: { type: ["string", "null"] },
+										period: { type: "string" },
+									},
+									required: ["amount", "currency", "period"],
+									additionalProperties: false,
+								},
+							},
+							zh: { type: "string" },
 						},
-						required: ["amount", "currency", "period"],
+						required: ["i", "tags", "prices", "zh"],
 						additionalProperties: false,
 					},
 				},
-				zh: { type: "string" },
 			},
-			required: ["i", "tags", "prices", "zh"],
+			required: ["items"],
 			additionalProperties: false,
 		},
 	},
 };
+
+// 支持 Chat Completions JSON Schema 与 chat_template_kwargs.enable_thinking=false 的模型。
+const STRUCTURED_NO_THINK_MODELS = new Set([
+	"@cf/google/gemma-4-26b-a4b-it",
+	"@cf/qwen/qwen3.8-27b",
+	"@cf/zai-org/glm-4.7-flash",
+	"@cf/deepseek-ai/deepseek-v4-flash-0731",
+	"@cf/deepseek-ai/deepseek-v4-pro-0813",
+	"@cf/nvidia/nemotron-3-120b-a12b",
+	"@cf/moonshotai/kimi-k2.6",
+]);
 
 const STATE_KEY = "let-monitor-state-v1";
 
@@ -195,12 +218,12 @@ function extractAiText(out: unknown): string {
 			return first.text;
 		}
 	}
-	if ("response" in out && Array.isArray(out.response)) return JSON.stringify(out.response);
+	if ("response" in out && typeof out.response === "object" && out.response !== null) return JSON.stringify(out.response);
 	return "";
 }
 
 async function aiChatViaBinding(env: RuntimeEnv, model: string, system: string, user: string, d: Deps): Promise<string> {
-	const isQwen = model === "@cf/qwen/qwen3-30b-a3b-fp8";
+	const structuredNoThink = STRUCTURED_NO_THINK_MODELS.has(model);
 	let last: unknown = null;
 	for (let attempt = 1; attempt <= 3; attempt++) {
 		try {
@@ -209,11 +232,16 @@ async function aiChatViaBinding(env: RuntimeEnv, model: string, system: string, 
 				{
 					messages: [
 						{ role: "system", content: system },
-						{ role: "user", content: isQwen ? `${user}\n/no_think` : user },
+						{ role: "user", content: user },
 					],
 					temperature: 0,
 					max_tokens: 8000,
-					...(isQwen ? { response_format: CLASSIFY_RESPONSE_FORMAT } : {}),
+					...(structuredNoThink
+						? {
+							chat_template_kwargs: { enable_thinking: false },
+							response_format: CLASSIFY_RESPONSE_FORMAT,
+						}
+						: {}),
 				} as Record<string, unknown>,
 			);
 			const text = extractAiText(out);
